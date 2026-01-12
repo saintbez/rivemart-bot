@@ -6,37 +6,15 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 
 const app = express();
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
 
-/* ============================
-   In-memory order store
-   ============================ */
+// =======================
+// In-memory order store
+// =======================
 const orders = new Map();
 
-/* ============================
-   Helpers
-   ============================ */
-function maskEmail(email) {
-  if (!email || !email.includes("@")) return "Hidden";
-  const [name, domain] = email.split("@");
-  return `${name.slice(0, 3)}***@${domain}`;
-}
-
-function generateToken(orderId) {
-  return crypto
-    .createHmac("sha256", process.env.RECEIPT_SECRET)
-    .update(orderId)
-    .digest("hex");
-}
-
-function formatMoney(amount, currency) {
-  if (!amount) return `0 ${currency}`;
-  return `${currency} ${(Number(amount) / 100).toFixed(2)}`;
-}
-
-/* ============================
-   Discord Bot
-   ============================ */
+// =======================
+// Discord Client
+// =======================
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -47,206 +25,186 @@ client.once("ready", () => {
 
 client.login(process.env.DISCORD_TOKEN);
 
-/* ============================
-   SellApp Webhook
-   ============================ */
+// =======================
+// Helpers
+// =======================
+function maskEmail(email) {
+  if (!email || !email.includes("@")) return "Unknown";
+  const [name, domain] = email.split("@");
+  return name.slice(0, 3) + "***@" + domain;
+}
+
+function formatMoney(amount, currency) {
+  if (!amount) return "0.00";
+  return (Number(amount) / 100).toFixed(2) + " " + currency;
+}
+
+function generateToken(orderId) {
+  return crypto
+    .createHmac("sha256", process.env.RECEIPT_SECRET)
+    .update(orderId)
+    .digest("hex");
+}
+
+// =======================
+// SellApp Webhook
+// =======================
 app.post("/sellapp-webhook", async (req, res) => {
   try {
     const { event, data } = req.body;
-    console.log("📦 Webhook:", event);
+    console.log("📦 Webhook received:", event);
 
-    if (event !== "order.paid" && event !== "order.completed") {
-      return res.json({ ignored: true });
+    // Accept paid OR completed
+    if (!["order.paid", "order.completed"].includes(event)) {
+      return res.json({ message: "Ignored" });
     }
 
     const orderId = String(data.id);
-    const variant = data.product_variants?.[0];
 
+    const variant = data.product_variants?.[0];
     const product = variant?.product_title || "Unknown";
     const quantity = variant?.quantity || 1;
 
     const roblox =
-      variant?.additional_information?.find(i =>
-        i.label.toLowerCase().includes("roblox")
+      variant?.additional_information?.find(v =>
+        v.label?.toLowerCase().includes("roblox")
       )?.value || "Not provided";
 
-    const email = data.customer_information?.email || "";
+    const email = data.customer_information?.email || "Unknown";
     const country = data.customer_information?.country || "Unknown";
-    const discordUser =
-      data.customer_information?.discord_data?.username || "Not linked";
-
-    const paid = data.status?.status?.status === "COMPLETED";
-
-    const totalGBP =
-      data.payment?.full_price?.total?.inclusive || 0;
-
-    const totalUSD =
-      data.payment?.total?.gross_sale_usd || 0;
+    const discordUser = data.customer_information?.discord_data?.username || "Not linked";
 
     const coupon =
-      variant?.invoice_payment?.payment_details?.modifications?.[0]
-        ?.attributes?.code || "None";
+      variant?.invoice_payment?.payment_details?.modifications?.[0]?.attributes?.code ||
+      "None";
+
+    const totalGBP = data.payment?.full_price?.base;
+    const totalUSD = data.payment?.total?.gross_sale_usd;
 
     const createdAt = new Date(data.created_at).toUTCString();
+
     const token = generateToken(orderId);
 
-    /* Store order securely */
+    // Store order securely
     orders.set(orderId, {
+      orderId,
       product,
       quantity,
       roblox,
       email,
       country,
       discordUser,
-      paid,
+      coupon,
       totalGBP,
       totalUSD,
-      coupon,
       createdAt,
-      token
+      token,
+      paid: true
     });
 
-    /* Discord Embed */
+    // =======================
+    // Discord Embed
+    // =======================
     const embed = new EmbedBuilder()
       .setTitle("🛒 New Order Received")
-      .setColor(paid ? 0x57f287 : 0xed4245)
+      .setColor(0x5865f2)
       .addFields(
         { name: "📦 Product", value: product, inline: true },
         { name: "🔢 Quantity", value: String(quantity), inline: true },
-        {
-          name: "💷 Total (GBP)",
-          value: `£${(totalGBP / 100).toFixed(2)}`,
-          inline: true
-        },
-        {
-          name: "💵 Total (USD)",
-          value: `$${(totalUSD / 100).toFixed(2)}`,
-          inline: true
-        },
+        { name: "💷 Total (GBP)", value: "£" + formatMoney(totalGBP, "GBP"), inline: true },
+        { name: "💵 Total (USD)", value: "$" + formatMoney(totalUSD, "USD"), inline: true },
         { name: "🏷 Coupon", value: coupon, inline: true },
         { name: "🎮 Roblox Username", value: roblox, inline: true },
+        { name: "📧 Email", value: maskEmail(email), inline: true },
         { name: "🌍 Country", value: country, inline: true },
         { name: "💬 Discord", value: discordUser, inline: true },
-        {
-          name: "💳 Payment Status",
-          value: paid ? "✅ Paid" : "❌ Not Paid",
-          inline: true
-        },
-        { name: "🆔 Order ID", value: orderId, inline: false },
-        { name: "⏰ Order Time (UTC)", value: createdAt, inline: false }
+        { name: "💳 Payment Status", value: "✅ Paid", inline: true },
+        { name: "🆔 Order ID", value: orderId, inline: true },
+        { name: "⏰ Order Time (UTC)", value: createdAt }
       )
-      .setFooter({ text: "RiveMart • Automated Order System" })
-      .setTimestamp();
+      .setFooter({ text: "RiveMart • Automated Order System" });
 
-    const channel = await client.channels.fetch(
-      process.env.ORDER_CHANNEL_ID
-    );
+    const channel = await client.channels.fetch(process.env.ORDER_CHANNEL_ID);
     if (channel) await channel.send({ embeds: [embed] });
 
-    res.json({ ok: true });
+    return res.json({ message: "OK" });
   } catch (err) {
     console.error("❌ Webhook error:", err);
-    res.status(500).json({ error: "Webhook failed" });
+    return res.json({ message: "Handled with error" });
   }
 });
 
-/* ============================
-   Receipt (LOCKED)
-   ============================ */
-app.get("/receipt", (req, res) => {
+// =======================
+// Secure Receipt Page
+// =======================
+app.get("/success", (req, res) => {
   const { order, token } = req.query;
-  const data = orders.get(order);
+  if (!order || !token) {
+    return res.status(403).send("Invalid receipt link.");
+  }
 
-  if (!data || token !== data.token) {
-    return res.status(403).send("Unauthorized");
+  const record = orders.get(order);
+  if (!record) {
+    return res.status(404).send("Order not found.");
+  }
+
+  if (record.token !== token) {
+    return res.status(403).send("Unauthorized receipt access.");
   }
 
   res.send(`
-    <html>
-    <head>
-      <title>Verify Order</title>
-      <style>
-        body { background:#0f0f12;color:white;font-family:Inter,Arial;text-align:center;padding:60px }
-        input,button { padding:12px;border-radius:6px;border:none }
-        button { background:#5865F2;color:white;cursor:pointer }
-      </style>
-    </head>
-    <body>
-      <h1>🔐 Verify Your Order</h1>
-      <p>Email used at checkout</p>
-      <p style="opacity:.6">${maskEmail(data.email)}</p>
-
-      <form method="POST" action="/verify">
-        <input type="hidden" name="order" value="${order}">
-        <input type="hidden" name="token" value="${token}">
-        <input type="email" name="email" required placeholder="you@example.com">
-        <br><br>
-        <button>Verify</button>
-      </form>
-    </body>
-    </html>
-  `);
+<!DOCTYPE html>
+<html>
+<head>
+<title>RiveMart Receipt</title>
+<style>
+body {
+  background:#0e0e10;
+  color:#fff;
+  font-family:Arial;
+  display:flex;
+  justify-content:center;
+}
+.card {
+  background:#1e1f22;
+  padding:30px;
+  border-radius:12px;
+  width:420px;
+}
+h1 { color:#57f287; }
+hr { border:1px solid #333; }
+.btn {
+  display:inline-block;
+  margin-top:12px;
+  padding:12px 18px;
+  background:#5865F2;
+  color:white;
+  text-decoration:none;
+  border-radius:6px;
+}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>✅ Purchase Confirmed</h1>
+<p><b>Order ID:</b> ${record.orderId}</p>
+<p><b>Product:</b> ${record.product}</p>
+<p><b>Quantity:</b> ${record.quantity}</p>
+<p><b>Roblox:</b> ${record.roblox}</p>
+<p><b>Email:</b> ${maskEmail(record.email)}</p>
+<p><b>Country:</b> ${record.country}</p>
+<p><b>Total:</b> £${formatMoney(record.totalGBP, "GBP")}</p>
+<hr>
+<a class="btn" href="https://discord.gg/PRmy2F3gAp">Join Discord</a>
+</div>
+</body>
+</html>
+`);
 });
 
-/* ============================
-   Email Verification
-   ============================ */
-app.post("/verify", (req, res) => {
-  const { order, token, email } = req.body;
-  const data = orders.get(order);
-
-  if (!data || token !== data.token) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  if (email.toLowerCase() !== data.email.toLowerCase()) {
-    return res.status(403).send("Email does not match order");
-  }
-
-  res.redirect(`/receipt-final?order=${order}&token=${token}`);
-});
-
-/* ============================
-   Final Receipt
-   ============================ */
-app.get("/receipt-final", (req, res) => {
-  const { order, token } = req.query;
-  const d = orders.get(order);
-
-  if (!d || token !== d.token) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  res.send(`
-    <html>
-    <head>
-      <title>Order Receipt</title>
-      <style>
-        body { background:#0f0f12;color:white;font-family:Inter,Arial;padding:60px }
-        .box { max-width:600px;margin:auto;background:#18181d;padding:30px;border-radius:12px }
-        a { display:inline-block;margin-top:20px;padding:12px 20px;border-radius:6px;background:#5865F2;color:white;text-decoration:none }
-      </style>
-    </head>
-    <body>
-      <div class="box">
-        <h1>✅ Order Confirmed</h1>
-        <p><strong>Product:</strong> ${d.product}</p>
-        <p><strong>Quantity:</strong> ${d.quantity}</p>
-        <p><strong>Roblox:</strong> ${d.roblox}</p>
-        <p><strong>Total:</strong> £${(d.totalGBP / 100).toFixed(2)}</p>
-        <p><strong>Status:</strong> ${d.paid ? "Paid" : "Pending"}</p>
-        <p><strong>Order ID:</strong> ${order}</p>
-
-        <a href="https://discord.gg/PRmy2F3gAp">Join Discord</a>
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-/* ============================
-   Start Server
-   ============================ */
+// =======================
+// Start Server
+// =======================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🌐 Server running on port ${PORT}`);
