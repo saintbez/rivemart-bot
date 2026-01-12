@@ -11,13 +11,9 @@ const orders = new Map();
 
 /* ---------------- HELPERS ---------------- */
 
-function normalizeMoney(...values) {
-  for (const v of values) {
-    if (v !== undefined && v !== null && !isNaN(v)) {
-      return (Number(v) / 100).toFixed(2);
-    }
-  }
-  return "0.00";
+function normalizeMoney(cents) {
+  if (cents === undefined || cents === null || isNaN(cents)) return "0.00";
+  return (Number(cents) / 100).toFixed(2);
 }
 
 function maskEmail(email) {
@@ -49,7 +45,6 @@ client.login(process.env.DISCORD_TOKEN);
 
 app.post("/sellapp-webhook", async (req, res) => {
   try {
-    // 🔍 LOG FULL WEBHOOK DATA FOR DEBUGGING
     console.log("📦 FULL WEBHOOK DATA:", JSON.stringify(req.body, null, 2));
     
     const { event, data } = req.body;
@@ -61,82 +56,43 @@ app.post("/sellapp-webhook", async (req, res) => {
     const orderId = String(data.id);
     const variant = data.product_variants?.[0] || {};
 
-    const product = variant.product_title || data.product?.title || "Unknown Product";
+    const product = variant.product_title || "Unknown Product";
     const quantity = variant.quantity || 1;
 
-    // 🔧 IMPROVED ROBLOX USERNAME EXTRACTION
+    // 🔧 FIX: Extract Roblox username from additional_information by checking the LABEL
     let roblox = "Not provided";
-    
-    // Check custom fields first
-    if (data.custom_fields) {
-      roblox = data.custom_fields["Roblox Username"] ||
-               data.custom_fields["roblox_username"] ||
-               data.custom_fields["roblox"] ||
-               data.custom_fields["Roblox"] ||
-               roblox;
-    }
-    
-    // Check additional information
-    if (roblox === "Not provided" && variant.additional_information) {
+    if (variant.additional_information && Array.isArray(variant.additional_information)) {
       const robloxField = variant.additional_information.find(f =>
-        f.key && f.key.toLowerCase().includes("roblox")
+        f.label && f.label.toLowerCase().includes("roblox")
       );
-      if (robloxField) roblox = robloxField.value;
+      if (robloxField && robloxField.value) {
+        roblox = robloxField.value;
+      }
     }
 
-    const email = data.customer_information?.email || 
-                  data.customer?.email || 
-                  "Hidden";
-    
-    const country = data.customer_information?.country || 
-                    data.customer?.country || 
-                    "Unknown";
+    const email = data.customer_information?.email || "Hidden";
+    const country = data.customer_information?.country || "Unknown";
 
-    // 🔧 IMPROVED DISCORD USERNAME EXTRACTION
+    // 🔧 FIX: Extract Discord username from discord_data.username
     let discordUser = "Not provided";
+    if (data.customer_information?.discord_data?.username) {
+      discordUser = data.customer_information.discord_data.username;
+    }
+
+    const coupon = data.coupon_id ? 
+      variant.invoice_payment?.payment_details?.modifications?.find(m => m.type === "coupon")?.attributes?.code || "Used" 
+      : "None";
+
+    // 🔧 FIX: Use gross_sale for the actual product price (before discounts)
+    const grossSaleGBP = variant.invoice_payment?.payment_details?.gross_sale || 
+                         data.payment?.full_price?.base || 
+                         "0";
     
-    if (data.customer_information?.discord) {
-      discordUser = data.customer_information.discord;
-    } else if (data.customer_information?.discord_username) {
-      discordUser = data.customer_information.discord_username;
-    } else if (data.custom_fields) {
-      discordUser = data.custom_fields["Discord Username"] ||
-                    data.custom_fields["discord"] ||
-                    data.custom_fields["Discord"] ||
-                    discordUser;
-    }
+    const totalGBP = normalizeMoney(grossSaleGBP);
 
-    const coupon = data.coupon?.code || "None";
-
-    // 🔧 IMPROVED PRICE EXTRACTION
-    let totalUSD = "0.00";
-    let totalGBP = "0.00";
-
-    // Try formatted display prices first (already in correct format)
-    if (data.total_display) {
-      totalUSD = data.total_display.replace(/[^0-9.]/g, "");
-    } else if (data.price_display) {
-      totalUSD = data.price_display.replace(/[^0-9.]/g, "");
-    } else {
-      // Fall back to cent values
-      totalUSD = normalizeMoney(
-        data.total_price_usd,
-        data.price?.total_usd,
-        data.price?.total,
-        data.total_price,
-        data.subtotal
-      );
-    }
-
-    // Try GBP formatted display
-    if (data.total_display_gbp) {
-      totalGBP = data.total_display_gbp.replace(/[^0-9.]/g, "");
-    } else {
-      totalGBP = normalizeMoney(
-        data.total_price_gbp,
-        data.price?.total_gbp
-      );
-    }
+    // Convert to USD using exchange rate
+    const exchangeRate = parseFloat(variant.invoice_payment?.exchange_rate || data.payment?.total?.exchange_rate || 1);
+    const totalUSD = (parseFloat(totalGBP) * exchangeRate).toFixed(2);
 
     const status = "✅ Paid";
     const createdAt = new Date(data.created_at).toUTCString();
@@ -241,6 +197,19 @@ body {
   box-shadow:0 10px 30px rgba(0,0,0,.1);
 }
 h1 { color:black; }
+.info-row {
+  display:flex;
+  justify-content:space-between;
+  padding:8px 0;
+  border-bottom:1px solid #f0f0f0;
+}
+.info-label {
+  font-weight:bold;
+  color:#555;
+}
+.info-value {
+  color:#222;
+}
 .box {
   background:#f1f5ff;
   padding:15px;
@@ -257,17 +226,41 @@ h1 { color:black; }
 <div class="card">
 <h1>✅ Purchase Confirmed</h1>
 
-<p><b>Order ID:</b> ${r.orderId}</p>
-<p><b>Product:</b> ${r.product}</p>
-<p><b>Quantity:</b> ${r.quantity}</p>
-<p><b>Roblox:</b> ${r.roblox}</p>
-<p><b>Discord:</b> ${r.discordUser}</p>
-<p><b>Email:</b> ${maskEmail(r.email)}</p>
-<p><b>Country:</b> ${r.country}</p>
-<p><b>Total Paid:</b> £${r.totalGBP} / $${r.totalUSD}</p>
+<div class="info-row">
+  <span class="info-label">Order ID:</span>
+  <span class="info-value">${r.orderId}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Product:</span>
+  <span class="info-value">${r.product}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Quantity:</span>
+  <span class="info-value">${r.quantity}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Roblox Username:</span>
+  <span class="info-value">${r.roblox}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Discord:</span>
+  <span class="info-value">${r.discordUser}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Email:</span>
+  <span class="info-value">${maskEmail(r.email)}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Country:</span>
+  <span class="info-value">${r.country}</span>
+</div>
+<div class="info-row">
+  <span class="info-label">Total Paid:</span>
+  <span class="info-value">£${r.totalGBP} / $${r.totalUSD}</span>
+</div>
 
 <div class="box delivery">
-<b>🚚 Delivery</b>
+<b>🚚 Delivery Information</b>
 <p>
 Our staff will message you via Discord to deliver your product.
 Please ensure your DMs are open and you have joined the RiveMart server.
