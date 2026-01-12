@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 
 const app = express();
 app.use(bodyParser.json());
@@ -40,24 +40,23 @@ app.post("/sellapp-webhook", async (req, res) => {
     const { event, data } = req.body;
     console.log("📦 Webhook received:", event);
 
-    // Treat order.paid as completed (SellApp change)
     if (event !== "order.paid" && event !== "order.completed") {
-      return res.json({ message: "Ignored (not paid)" });
+      return res.json({ message: "Ignored" });
     }
 
     const orderId = data.id.toString();
     const variant = data.product_variants?.[0] || {};
-    const paymentDetails = variant.invoice_payment?.payment_details || {};
+    const payment = variant.invoice_payment?.payment_details || {};
 
     const product = variant.product_title || "Unknown";
-    const quantity = paymentDetails.quantity || 1;
+    const quantity = payment.quantity || 1;
 
-    const totalGBP = formatMoney(paymentDetails.gross_sale, "£");
+    const totalGBP = formatMoney(payment.gross_sale, "£");
     const totalUSD = formatMoney(data.payment?.total?.gross_sale_usd, "$");
 
     const coupon =
-      paymentDetails.modifications?.find(m => m.type === "coupon")
-        ? paymentDetails.modifications[0].attributes?.code || "Applied"
+      payment.modifications?.find(m => m.type === "coupon")
+        ? payment.modifications[0]?.attributes?.code || "Applied"
         : "None";
 
     const roblox =
@@ -70,18 +69,15 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     const discordUser =
       data.customer_information?.discord_data?.username
-        ? `${data.customer_information.discord_data.username}`
+        ? data.customer_information.discord_data.username
         : "Not linked";
 
     const paid =
       data.status?.status?.status === "COMPLETED" ||
       data.payment?.total?.total_usd === "0";
 
-    const orderTime = new Date(data.created_at).toUTCString();
+    const orderTime = new Date(data.created_at);
 
-    // ==================
-    // Store order securely (receipt use)
-    // ==================
     orders.set(orderId, {
       product,
       quantity,
@@ -97,104 +93,64 @@ app.post("/sellapp-webhook", async (req, res) => {
     });
 
     // ==================
-    // Discord Message
+    // Discord Embed
     // ==================
+    const embed = new EmbedBuilder()
+      .setTitle("🛒 New Order Received")
+      .setColor(paid ? 0x57F287 : 0xFAA61A)
+      .addFields(
+        { name: "📦 Product", value: product, inline: false },
+        { name: "🔢 Quantity", value: String(quantity), inline: true },
+        { name: "🏷 Coupon", value: coupon, inline: true },
+        { name: "💷 Total (GBP)", value: totalGBP, inline: true },
+        { name: "💵 Total (USD)", value: totalUSD, inline: true },
+        { name: "🎮 Roblox Username", value: roblox, inline: false },
+        { name: "📧 Email", value: email, inline: false },
+        { name: "🌍 Country", value: country, inline: true },
+        { name: "💬 Discord", value: discordUser, inline: true },
+        { name: "💳 Payment Status", value: paid ? "✅ Paid" : "⏳ Pending", inline: true },
+        { name: "🆔 Order ID", value: orderId, inline: false }
+      )
+      .setTimestamp(orderTime)
+      .setFooter({ text: "RiveMart • Automated Order System" });
+
     const channel = await client.channels.fetch(process.env.ORDER_CHANNEL_ID);
-
     if (channel) {
-      await channel.send(
-`🛒 **New Order Received**
-
-📦 **Product**
-${product}
-
-🔢 **Quantity**
-${quantity}
-
-💷 **Total (GBP)**
-${totalGBP}
-
-💵 **Total (USD)**
-${totalUSD}
-
-🏷 **Coupon**
-${coupon}
-
-🎮 **Roblox Username**
-${roblox}
-
-📧 **Email**
-${email}
-
-🌍 **Country**
-${country}
-
-💬 **Discord**
-${discordUser}
-
-💳 **Payment Status**
-${paid ? "✅ Paid" : "⏳ Pending"}
-
-🆔 **Order ID**
-${orderId}
-
-⏰ **Order Time (UTC)**
-${orderTime}`
-      );
+      await channel.send({ embeds: [embed] });
     }
 
-    return res.json({ message: "OK" });
+    res.json({ message: "OK" });
 
   } catch (err) {
     console.error("❌ Webhook error:", err);
-    return res.status(500).json({ message: "Webhook error" });
+    res.status(500).json({ message: "Error" });
   }
 });
 
 // ==================
-// Receipt / Success Page
+// Success Page
 // ==================
 app.get("/success", (req, res) => {
   const orderId = req.query.order;
-
   if (!orderId || !orders.has(orderId)) {
-    return res.send("❌ Order not found or not processed yet.");
+    return res.send("❌ Order not found.");
   }
 
   const o = orders.get(orderId);
 
   res.send(`
   <html>
-    <head>
-      <title>Order Receipt</title>
-    </head>
     <body style="font-family:Arial;text-align:center;padding:40px;">
       <h1>✅ Purchase Successful</h1>
-
       <p><strong>Order ID:</strong> ${orderId}</p>
       <p><strong>Product:</strong> ${o.product}</p>
       <p><strong>Quantity:</strong> ${o.quantity}</p>
       <p><strong>Total:</strong> ${o.totalGBP} (${o.totalUSD})</p>
       <p><strong>Roblox Username:</strong> ${o.roblox}</p>
       <p><strong>Email:</strong> ${o.email}</p>
-      <p><strong>Payment Status:</strong> ${o.paid ? "Paid" : "Pending"}</p>
-      <p><strong>Order Time:</strong> ${o.orderTime}</p>
+      <p><strong>Order Time:</strong> ${o.orderTime.toUTCString()}</p>
 
-      <hr style="margin:30px 0;">
-
-      <a href="https://discord.com/invite/PRmy2F3gAp"
-        style="display:inline-block;padding:12px 24px;margin:8px;background:#5865F2;color:white;border-radius:6px;text-decoration:none;font-weight:bold;">
-        Join Discord
-      </a>
-
-      <a href="https://discord.com/channels/1457151716238561321"
-        style="display:inline-block;padding:12px 24px;margin:8px;background:#2F3136;color:white;border-radius:6px;text-decoration:none;font-weight:bold;">
-        Open Support Ticket
-      </a>
-
-      <p style="margin-top:30px;color:#777;">
-        Keep this page as your receipt.
-      </p>
+      <a href="https://discord.com/invite/PRmy2F3gAp">Join Discord</a>
     </body>
   </html>
   `);
