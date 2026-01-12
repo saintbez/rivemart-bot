@@ -11,9 +11,9 @@ app.use(bodyParser.json());
 const orders = new Map();
 
 // ------------------ HELPERS ------------------
-function formatMoney(cents, currency) {
-  if (!cents) return "0.00";
-  return (cents / 100).toFixed(2);
+function moneyFromSellApp(value) {
+  if (!value) return "0.00";
+  return (Number(value) / 100).toFixed(2);
 }
 
 function maskEmail(email) {
@@ -49,7 +49,7 @@ app.post("/sellapp-webhook", async (req, res) => {
       return res.json({ ignored: true });
     }
 
-    const orderId = data.id.toString();
+    const orderId = String(data.id);
     const variant = data.product_variants?.[0] || {};
 
     const product = variant.product_title || "Unknown Product";
@@ -65,15 +65,21 @@ app.post("/sellapp-webhook", async (req, res) => {
     const discordUser =
       data.customer_information?.discord_username || "Not provided";
 
-    const coupon =
-      data.coupon?.code || "None";
+    const coupon = data.coupon?.code || "None";
 
-    const totalUSD = data.price?.total || 0;
-    const totalGBP = data.price?.total_gbp || 0;
+    // ✅ FIXED PRICE HANDLING
+    const totalUSD =
+      data.price?.total ??
+      data.price?.total_usd ??
+      data.total_price ??
+      0;
 
-    const status =
-      data.status === "paid" ? "✅ Paid" : "⏳ Pending";
+    const totalGBP =
+      data.price?.total_gbp ??
+      data.price?.gbp ??
+      0;
 
+    const status = data.status === "paid" ? "✅ Paid" : "⏳ Pending";
     const createdAt = new Date(data.created_at).toUTCString();
 
     const token = generateToken(orderId);
@@ -95,27 +101,25 @@ app.post("/sellapp-webhook", async (req, res) => {
     });
 
     const embed = new EmbedBuilder()
-      .setColor("#57F287")
+      .setColor("#2B8AF7")
       .setTitle("🛒 New Order Received")
       .addFields(
-        { name: "📦 Product", value: product, inline: false },
+        { name: "📦 Product", value: product },
         { name: "🔢 Quantity", value: `${quantity}`, inline: true },
-        { name: "💷 Total (GBP)", value: `£${formatMoney(totalGBP)}`, inline: true },
-        { name: "💵 Total (USD)", value: `$${formatMoney(totalUSD)}`, inline: true },
+        { name: "💷 Total (GBP)", value: `£${moneyFromSellApp(totalGBP)}`, inline: true },
+        { name: "💵 Total (USD)", value: `$${moneyFromSellApp(totalUSD)}`, inline: true },
         { name: "🏷 Coupon", value: coupon, inline: true },
         { name: "🎮 Roblox Username", value: roblox, inline: true },
         { name: "🌍 Country", value: country, inline: true },
         { name: "💬 Discord", value: discordUser, inline: true },
         { name: "💳 Payment Status", value: status, inline: true },
-        { name: "🆔 Order ID", value: orderId, inline: false },
-        { name: "⏰ Order Time (UTC)", value: createdAt, inline: false }
+        { name: "🆔 Order ID", value: orderId },
+        { name: "⏰ Order Time (UTC)", value: createdAt }
       )
       .setFooter({ text: "RiveMart • Automated Order System" })
       .setTimestamp();
 
-    const channel = await client.channels.fetch(
-      process.env.ORDER_CHANNEL_ID
-    );
+    const channel = await client.channels.fetch(process.env.ORDER_CHANNEL_ID);
     if (channel) channel.send({ embeds: [embed] });
 
     res.json({ success: true });
@@ -133,10 +137,10 @@ app.get("/success", (req, res) => {
   const record = orders.get(order);
   if (!record) return res.send("Order not found.");
 
-  return res.redirect(`/receipt?order=${order}&token=${record.token}`);
+  res.redirect(`/receipt?order=${order}&token=${record.token}`);
 });
 
-// ------------------ LOCKED RECEIPT ------------------
+// ------------------ RECEIPT PAGE (WHITE MODE) ------------------
 app.get("/receipt", (req, res) => {
   const { order, token } = req.query;
 
@@ -152,24 +156,34 @@ app.get("/receipt", (req, res) => {
 <title>RiveMart Receipt</title>
 <style>
 body {
-  background:#0b0c10;
-  color:#fff;
+  background:#f6f7fb;
   font-family:Arial, sans-serif;
   display:flex;
   justify-content:center;
   padding:40px;
 }
 .card {
-  background:#1f2833;
+  background:#ffffff;
   padding:30px;
   border-radius:14px;
-  width:420px;
+  width:460px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.1);
 }
 h1 {
-  color:#66fcf1;
+  color:#2b8af7;
+}
+.box {
+  background:#f0f4ff;
+  padding:15px;
+  border-radius:10px;
+  margin-top:15px;
+}
+.delivery {
+  background:#eefaf3;
+  border-left:5px solid #3cb371;
 }
 hr {
-  border:1px solid #333;
+  margin:20px 0;
 }
 </style>
 </head>
@@ -177,13 +191,23 @@ hr {
 <div class="card">
 <h1>✅ Purchase Confirmed</h1>
 <hr>
+
 <p><b>Order ID:</b> ${record.orderId}</p>
 <p><b>Product:</b> ${record.product}</p>
 <p><b>Quantity:</b> ${record.quantity}</p>
-<p><b>Roblox:</b> ${record.roblox}</p>
+<p><b>Roblox Username:</b> ${record.roblox}</p>
 <p><b>Email:</b> ${maskEmail(record.email)}</p>
 <p><b>Country:</b> ${record.country}</p>
-<p><b>Total:</b> £${formatMoney(record.totalGBP)}</p>
+<p><b>Total Paid:</b> £${moneyFromSellApp(record.totalGBP)}</p>
+
+<div class="box delivery">
+<b>🚚 Delivery Information</b>
+<p>
+Our staff will contact you via <b>Discord</b> shortly to deliver your product.
+Please make sure your DMs are open and that you have joined the RiveMart Discord server.
+</p>
+</div>
+
 </div>
 </body>
 </html>
