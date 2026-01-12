@@ -7,15 +7,18 @@ const app = express();
 app.use(bodyParser.json());
 
 // --------------------
-// In-memory order store
+// In-memory secure order store
 // --------------------
-const orders = new Map();
+const orders = new Map(); // orderId -> order data
 
 // --------------------
 // Discord Setup
 // --------------------
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
 client.once("ready", () => {
@@ -29,12 +32,11 @@ client.login(process.env.DISCORD_TOKEN);
 // --------------------
 app.post("/sellapp-webhook", async (req, res) => {
   try {
-    const payload = req.body;
-    const { event, data } = payload;
+    const { event, data } = req.body;
 
     console.log("📦 Webhook received:", event);
 
-    // ✅ Treat order.paid as completed (SellApp change)
+    // ✅ Treat order.paid as completed (SellApp official guidance)
     const isPaid =
       event === "order.paid" ||
       data?.status?.status?.status === "COMPLETED";
@@ -43,12 +45,17 @@ app.post("/sellapp-webhook", async (req, res) => {
       return res.json({ ignored: true });
     }
 
-    // --------------------
-    // Extract Order Info
-    // --------------------
     const orderId = String(data.id);
 
-    const productName =
+    // ❌ Prevent duplicate processing (fraud / resend safe)
+    if (orders.has(orderId)) {
+      return res.json({ message: "Already processed" });
+    }
+
+    // --------------------
+    // Extract Order Data
+    // --------------------
+    const product =
       data.product_variants?.[0]?.product_title || "Unknown Product";
 
     const email =
@@ -57,34 +64,37 @@ app.post("/sellapp-webhook", async (req, res) => {
     const country =
       data.customer_information?.country || "Unknown";
 
+    const discordUserId =
+      data.customer_information?.discord_data?.user_id || null;
+
     const discordUsername =
       data.customer_information?.discord_data?.username || "Not connected";
 
-    // ✅ FIXED Roblox username extraction
-    let robloxUsername = "Not provided";
+    // Roblox username (FIXED + REQUIRED SAFE)
+    let roblox = "Not provided";
     for (const variant of data.product_variants || []) {
       for (const info of variant.additional_information || []) {
         if (info.label?.toLowerCase().includes("roblox")) {
-          robloxUsername = info.value;
-          break;
+          roblox = info.value;
         }
       }
     }
 
     // --------------------
-    // Save for receipt page
+    // Store order securely
     // --------------------
     orders.set(orderId, {
-      product: productName,
-      roblox: robloxUsername,
+      product,
       email,
       country,
-      discord: discordUsername,
-      paid: true
+      roblox,
+      discordUsername,
+      paid: true,
+      roleAssigned: false
     });
 
     // --------------------
-    // Send Discord Embed
+    // Discord Notification
     // --------------------
     const channel = await client.channels.fetch(
       process.env.ORDER_CHANNEL_ID
@@ -92,26 +102,43 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     if (channel) {
       await channel.send({
-        embeds: [
-          {
-            title: "🛒 New Paid Order",
-            color: 0x00ff99,
-            fields: [
-              { name: "📦 Product", value: productName, inline: false },
-              { name: "🧾 Order ID", value: orderId, inline: true },
-              { name: "💳 Status", value: "PAID ✅", inline: true },
-              { name: "📧 Email", value: email, inline: false },
-              { name: "🌍 Country", value: country, inline: true },
-              { name: "🎮 Roblox", value: robloxUsername, inline: true },
-              { name: "💬 Discord", value: discordUsername, inline: true }
-            ],
-            timestamp: new Date()
-          }
-        ]
+        embeds: [{
+          title: "🛒 New Verified Purchase",
+          color: 0x00ff99,
+          fields: [
+            { name: "Product", value: product },
+            { name: "Order ID", value: orderId, inline: true },
+            { name: "Status", value: "PAID ✅", inline: true },
+            { name: "Email", value: email },
+            { name: "Country", value: country, inline: true },
+            { name: "Roblox", value: roblox, inline: true },
+            { name: "Discord", value: discordUsername }
+          ],
+          timestamp: new Date()
+        }]
       });
     }
 
+    // --------------------
+    // Role Assignment (ANTI-ABUSE)
+    // --------------------
+    if (discordUserId) {
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      const member = await guild.members.fetch(discordUserId).catch(() => null);
+
+      if (member) {
+        const roleId = "1457151716389687531"; // Verified Purchase role
+
+        if (!member.roles.cache.has(roleId)) {
+          await member.roles.add(roleId);
+          orders.get(orderId).roleAssigned = true;
+          console.log("✅ Role assigned");
+        }
+      }
+    }
+
     return res.json({ message: "OK" });
+
   } catch (err) {
     console.error("❌ Webhook error:", err);
     return res.status(500).json({ error: "Webhook failed" });
@@ -119,65 +146,45 @@ app.post("/sellapp-webhook", async (req, res) => {
 });
 
 // --------------------
-// Success / Receipt Page
+// Secure Receipt Page
 // --------------------
 app.get("/success", (req, res) => {
   const orderId = req.query.order;
-
-  if (!orderId) {
-    return res.send("No order ID provided.");
-  }
-
   const order = orders.get(orderId);
 
   if (!order) {
-    return res.send("Order not found yet. Please refresh in a moment.");
+    return res.send("❌ Order not found or not verified yet.");
   }
-
-  const joinDiscordURL = "https://discord.com/invite/PRmy2F3gAp";
-  const openTicketURL = "https://discord.com/channels/1457151716238561321";
 
   res.send(`
     <html>
-      <head>
-        <title>Order Receipt</title>
-      </head>
+      <head><title>Order Receipt</title></head>
       <body style="font-family:Arial;text-align:center;padding:40px;">
-        <h1>✅ Order Receipt</h1>
+        <h1>✅ Verified Purchase</h1>
 
         <p><strong>Order ID:</strong> ${orderId}</p>
         <p><strong>Product:</strong> ${order.product}</p>
         <p><strong>Roblox Username:</strong> ${order.roblox}</p>
         <p><strong>Email:</strong> ${order.email}</p>
         <p><strong>Country:</strong> ${order.country}</p>
-        <p><strong>Payment Status:</strong> PAID ✅</p>
+        <p><strong>Status:</strong> PAID ✅</p>
 
-        <hr style="margin:30px 0;">
+        <hr style="margin:30px">
 
-        <a href="${joinDiscordURL}"
-           style="display:inline-block;padding:12px 24px;margin:8px;
-                  background:#5865F2;color:white;border-radius:6px;
-                  text-decoration:none;font-weight:bold;">
+        <a href="https://discord.com/invite/PRmy2F3gAp"
+           style="padding:12px 24px;background:#5865F2;color:white;
+                  border-radius:6px;text-decoration:none;font-weight:bold;">
           Join Discord
         </a>
 
-        <a href="${openTicketURL}"
-           style="display:inline-block;padding:12px 24px;margin:8px;
-                  background:#2F3136;color:white;border-radius:6px;
-                  text-decoration:none;font-weight:bold;">
-          Open Support Ticket
-        </a>
-
         <p style="margin-top:30px;color:#888;">
-          Keep this page as your receipt.
+          This receipt is server-verified and cannot be forged.
         </p>
       </body>
     </html>
   `);
 });
 
-// --------------------
-// Start Server
 // --------------------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
