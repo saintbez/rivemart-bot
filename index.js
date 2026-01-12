@@ -39,7 +39,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-client.once("clientReady", () => {
+client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
@@ -49,6 +49,9 @@ client.login(process.env.DISCORD_TOKEN);
 
 app.post("/sellapp-webhook", async (req, res) => {
   try {
+    // 🔍 LOG FULL WEBHOOK DATA FOR DEBUGGING
+    console.log("📦 FULL WEBHOOK DATA:", JSON.stringify(req.body, null, 2));
+    
     const { event, data } = req.body;
 
     if (!["order.completed", "order.paid"].includes(event)) {
@@ -58,38 +61,84 @@ app.post("/sellapp-webhook", async (req, res) => {
     const orderId = String(data.id);
     const variant = data.product_variants?.[0] || {};
 
-    const product = variant.product_title || "Unknown Product";
+    const product = variant.product_title || data.product?.title || "Unknown Product";
     const quantity = variant.quantity || 1;
 
-    const roblox =
-      variant.additional_information?.find(f =>
-        f.key.toLowerCase().includes("roblox")
-      )?.value || "Not provided";
+    // 🔧 IMPROVED ROBLOX USERNAME EXTRACTION
+    let roblox = "Not provided";
+    
+    // Check custom fields first
+    if (data.custom_fields) {
+      roblox = data.custom_fields["Roblox Username"] ||
+               data.custom_fields["roblox_username"] ||
+               data.custom_fields["roblox"] ||
+               data.custom_fields["Roblox"] ||
+               roblox;
+    }
+    
+    // Check additional information
+    if (roblox === "Not provided" && variant.additional_information) {
+      const robloxField = variant.additional_information.find(f =>
+        f.key && f.key.toLowerCase().includes("roblox")
+      );
+      if (robloxField) roblox = robloxField.value;
+    }
 
-    const email = data.customer_information?.email || "Hidden";
-    const country = data.customer_information?.country || "Unknown";
-    const discordUser =
-      data.customer_information?.discord_username || "Not provided";
+    const email = data.customer_information?.email || 
+                  data.customer?.email || 
+                  "Hidden";
+    
+    const country = data.customer_information?.country || 
+                    data.customer?.country || 
+                    "Unknown";
+
+    // 🔧 IMPROVED DISCORD USERNAME EXTRACTION
+    let discordUser = "Not provided";
+    
+    if (data.customer_information?.discord) {
+      discordUser = data.customer_information.discord;
+    } else if (data.customer_information?.discord_username) {
+      discordUser = data.customer_information.discord_username;
+    } else if (data.custom_fields) {
+      discordUser = data.custom_fields["Discord Username"] ||
+                    data.custom_fields["discord"] ||
+                    data.custom_fields["Discord"] ||
+                    discordUser;
+    }
 
     const coupon = data.coupon?.code || "None";
 
-    /* 🔑 PRICE FIX (CHECK EVERYTHING) */
-    const totalUSD = normalizeMoney(
-      data.total_price_usd,
-      data.price?.total_usd,
-      data.price?.total,
-      data.total_price,
-      data.subtotal
-    );
+    // 🔧 IMPROVED PRICE EXTRACTION
+    let totalUSD = "0.00";
+    let totalGBP = "0.00";
 
-    const totalGBP = normalizeMoney(
-      data.total_price_gbp,
-      data.price?.total_gbp
-    );
+    // Try formatted display prices first (already in correct format)
+    if (data.total_display) {
+      totalUSD = data.total_display.replace(/[^0-9.]/g, "");
+    } else if (data.price_display) {
+      totalUSD = data.price_display.replace(/[^0-9.]/g, "");
+    } else {
+      // Fall back to cent values
+      totalUSD = normalizeMoney(
+        data.total_price_usd,
+        data.price?.total_usd,
+        data.price?.total,
+        data.total_price,
+        data.subtotal
+      );
+    }
 
-    /* 🔑 STATUS FIX */
+    // Try GBP formatted display
+    if (data.total_display_gbp) {
+      totalGBP = data.total_display_gbp.replace(/[^0-9.]/g, "");
+    } else {
+      totalGBP = normalizeMoney(
+        data.total_price_gbp,
+        data.price?.total_gbp
+      );
+    }
+
     const status = "✅ Paid";
-
     const createdAt = new Date(data.created_at).toUTCString();
     const token = generateToken(orderId);
 
@@ -107,6 +156,15 @@ app.post("/sellapp-webhook", async (req, res) => {
       status,
       createdAt,
       token
+    });
+
+    console.log("✅ Order processed:", {
+      orderId,
+      product,
+      roblox,
+      discordUser,
+      totalUSD,
+      totalGBP
     });
 
     const embed = new EmbedBuilder()
@@ -129,11 +187,16 @@ app.post("/sellapp-webhook", async (req, res) => {
       .setTimestamp();
 
     const channel = await client.channels.fetch(process.env.ORDER_CHANNEL_ID);
-    if (channel) channel.send({ embeds: [embed] });
+    if (channel) {
+      await channel.send({ embeds: [embed] });
+      console.log("✅ Discord message sent");
+    } else {
+      console.error("❌ Discord channel not found");
+    }
 
     res.json({ success: true });
   } catch (err) {
-    console.error("Webhook error:", err);
+    console.error("❌ Webhook error:", err);
     res.status(500).json({ error: "Webhook failed" });
   }
 });
@@ -198,9 +261,10 @@ h1 { color:black; }
 <p><b>Product:</b> ${r.product}</p>
 <p><b>Quantity:</b> ${r.quantity}</p>
 <p><b>Roblox:</b> ${r.roblox}</p>
+<p><b>Discord:</b> ${r.discordUser}</p>
 <p><b>Email:</b> ${maskEmail(r.email)}</p>
 <p><b>Country:</b> ${r.country}</p>
-<p><b>Total Paid:</b> £${r.totalGBP}</p>
+<p><b>Total Paid:</b> £${r.totalGBP} / $${r.totalUSD}</p>
 
 <div class="box delivery">
 <b>🚚 Delivery</b>
