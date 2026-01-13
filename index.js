@@ -54,19 +54,18 @@ app.post("/sellapp-webhook", async (req, res) => {
     }
 
     const orderId = String(data.id);
-    const variant = data.product_variants?.[0] || {};
 
-    const product = variant.product_title || "Unknown Product";
-    const quantity = variant.quantity || 1;
-
-    // Extract Roblox username from additional_information by checking the LABEL
+    // Extract Roblox username from ANY variant's additional_information
     let roblox = "Not provided";
-    if (variant.additional_information && Array.isArray(variant.additional_information)) {
-      const robloxField = variant.additional_information.find(f =>
-        f.label && f.label.toLowerCase().includes("roblox")
-      );
-      if (robloxField && robloxField.value) {
-        roblox = robloxField.value;
+    for (const variant of data.product_variants || []) {
+      if (variant.additional_information && Array.isArray(variant.additional_information)) {
+        const robloxField = variant.additional_information.find(f =>
+          f.label && f.label.toLowerCase().includes("roblox")
+        );
+        if (robloxField && robloxField.value) {
+          roblox = robloxField.value;
+          break;
+        }
       }
     }
 
@@ -81,46 +80,56 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     // Get coupon code if used
     const coupon = data.coupon_id ? 
-      variant.invoice_payment?.payment_details?.modifications?.find(m => m.type === "coupon")?.attributes?.code || "Used" 
+      data.product_variants?.[0]?.invoice_payment?.payment_details?.modifications?.find(m => m.type === "coupon")?.attributes?.code || "Used" 
       : "None";
 
-    // 🔧 PRICE CALCULATION FIX
-    // Priority order for getting the price:
-    // 1. unit_price (the actual product price)
-    // 2. total (what was paid)
-    // 3. full_price from top level
-    
-    const paymentDetails = variant.invoice_payment?.payment_details || {};
-    const currency = paymentDetails.currency || data.payment?.full_price?.currency || "GBP";
-    
-    // Get price in cents/pence
-    let priceCents = paymentDetails.unit_price || 
-                     paymentDetails.total || 
-                     paymentDetails.gross_sale ||
-                     data.payment?.full_price?.base || 
-                     "0";
-    
-    // Convert to decimal
-    const price = normalizeMoney(priceCents);
+    // 🔧 CALCULATE TOTAL PRICE FROM ALL PRODUCTS
+    let totalCents = 0;
+    let currency = "GBP";
+    const products = [];
+
+    for (const variant of data.product_variants || []) {
+      const paymentDetails = variant.invoice_payment?.payment_details || {};
+      currency = paymentDetails.currency || currency;
+      
+      // Get price per unit
+      let unitPrice = paymentDetails.unit_price || 
+                      paymentDetails.total || 
+                      paymentDetails.gross_sale || 
+                      0;
+      
+      const quantity = variant.quantity || 1;
+      const productTotal = Number(unitPrice) * quantity;
+      totalCents += productTotal;
+
+      products.push({
+        name: variant.product_title || "Unknown Product",
+        quantity: quantity,
+        unitPrice: normalizeMoney(unitPrice),
+        total: normalizeMoney(productTotal)
+      });
+
+      console.log(`Product: ${variant.product_title}, Qty: ${quantity}, Unit: ${unitPrice}, Total: ${productTotal}`);
+    }
+
+    // Convert total to decimal
+    const totalPrice = normalizeMoney(totalCents);
     
     // Format for GBP and USD
     let totalGBP = "0.00";
     let totalUSD = "0.00";
     
     if (currency === "GBP") {
-      totalGBP = price;
-      // Convert to USD using exchange rate
-      const exchangeRate = parseFloat(variant.invoice_payment?.exchange_rate || data.payment?.total?.exchange_rate || 1.35);
-      totalUSD = (parseFloat(price) * exchangeRate).toFixed(2);
+      totalGBP = totalPrice;
+      const exchangeRate = parseFloat(data.payment?.total?.exchange_rate || 1.35);
+      totalUSD = (parseFloat(totalPrice) * exchangeRate).toFixed(2);
     } else if (currency === "USD") {
-      totalUSD = price;
-      // Convert to GBP using exchange rate
-      const exchangeRate = parseFloat(variant.invoice_payment?.exchange_rate || data.payment?.total?.exchange_rate || 1.35);
-      totalGBP = (parseFloat(price) / exchangeRate).toFixed(2);
+      totalUSD = totalPrice;
+      const exchangeRate = parseFloat(data.payment?.total?.exchange_rate || 1.35);
+      totalGBP = (parseFloat(totalPrice) / exchangeRate).toFixed(2);
     } else {
-      // For other currencies, just use the price
-      totalGBP = price;
-      totalUSD = price;
+      totalGBP = totalPrice;
+      totalUSD = totalPrice;
     }
 
     const status = "✅ Paid";
@@ -129,8 +138,7 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     orders.set(orderId, {
       orderId,
-      product,
-      quantity,
+      products,
       roblox,
       email,
       country,
@@ -146,7 +154,7 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     console.log("✅ Order processed:", {
       orderId,
-      product,
+      products,
       roblox,
       discordUser,
       totalUSD,
@@ -154,15 +162,19 @@ app.post("/sellapp-webhook", async (req, res) => {
       currency
     });
 
+    // Build product list for Discord embed
+    const productList = products.map(p => 
+      `${p.name} x${p.quantity} (£${p.unitPrice} each = £${p.total})`
+    ).join('\n');
+
     const embed = new EmbedBuilder()
       .setColor(0x000000)
       .setTitle("🛒 New Order Received")
       .addFields(
-        { name: "📦 Product", value: product },
-        { name: "🔢 Quantity", value: String(quantity), inline: true },
+        { name: "📦 Products", value: productList || "No products" },
         { name: "💷 Total (GBP)", value: `£${totalGBP}`, inline: true },
         { name: "💵 Total (USD)", value: `$${totalUSD}`, inline: true },
-        { name: "🏷 Coupon", value: coupon },
+        { name: "🏷 Coupon", value: coupon, inline: true },
         { name: "🎮 Roblox Username", value: roblox, inline: true },
         { name: "🌍 Country", value: country, inline: true },
         { name: "💬 Discord", value: discordUser, inline: true },
@@ -207,6 +219,17 @@ app.get("/receipt", (req, res) => {
     return res.status(403).send("Unauthorized");
   }
 
+  // Build product rows HTML
+  const productRows = r.products.map(p => `
+    <div class="product-item">
+      <div class="product-info">
+        <div class="product-name">${p.name}</div>
+        <div class="product-qty">Quantity: ${p.quantity}</div>
+      </div>
+      <div class="product-price">£${p.total}</div>
+    </div>
+  `).join('');
+
   res.send(`
 <!DOCTYPE html>
 <html>
@@ -220,7 +243,7 @@ app.get("/receipt", (req, res) => {
   box-sizing: border-box;
 }
 body {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: white;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   min-height: 100vh;
   display: flex;
@@ -231,10 +254,11 @@ body {
 .card {
   background: white;
   padding: 40px;
-  max-width: 500px;
+  max-width: 600px;
   width: 100%;
-  border-radius: 20px;
-  box-shadow: 0 20px 60px rgba(0,0,0,.3);
+  border-radius: 12px;
+  box-shadow: 0 2px 20px rgba(0,0,0,.1);
+  border: 1px solid #e2e8f0;
 }
 h1 {
   color: #2d3748;
@@ -246,10 +270,45 @@ h1 {
   margin-bottom: 30px;
   font-size: 14px;
 }
+.section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #2d3748;
+  margin: 25px 0 15px 0;
+  padding-bottom: 10px;
+  border-bottom: 2px solid #e2e8f0;
+}
+.product-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px;
+  background: #f7fafc;
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+.product-info {
+  flex: 1;
+}
+.product-name {
+  font-weight: 600;
+  color: #2d3748;
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+.product-qty {
+  color: #718096;
+  font-size: 14px;
+}
+.product-price {
+  font-weight: 700;
+  color: #2d3748;
+  font-size: 18px;
+}
 .info-row {
   display: flex;
   justify-content: space-between;
-  padding: 15px 0;
+  padding: 12px 0;
   border-bottom: 1px solid #e2e8f0;
 }
 .info-label {
@@ -261,34 +320,36 @@ h1 {
   text-align: right;
   font-weight: 500;
 }
-.price-row {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+.total-row {
+  background: #2d3748;
   color: white;
   padding: 20px;
-  border-radius: 12px;
+  border-radius: 8px;
   margin: 20px 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.price-label {
-  font-size: 16px;
+.total-label {
+  font-size: 18px;
   font-weight: 600;
 }
-.price-value {
+.total-value {
   font-size: 24px;
   font-weight: 700;
 }
 .delivery {
-  background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
+  background: #f0fff4;
+  border-left: 4px solid #48bb78;
   padding: 20px;
-  border-radius: 12px;
+  border-radius: 8px;
   margin-top: 20px;
 }
 .delivery h3 {
   color: #2d3748;
   margin-bottom: 10px;
-  font-size: 18px;
+  font-size: 16px;
+  font-weight: 600;
 }
 .delivery p {
   color: #4a5568;
@@ -302,17 +363,18 @@ h1 {
   <h1>✅ Purchase Confirmed</h1>
   <p class="subtitle">Thank you for your order!</p>
 
+  <div class="section-title">📦 Products</div>
+  ${productRows}
+
+  <div class="total-row">
+    <span class="total-label">Total Paid</span>
+    <span class="total-value">£${r.totalGBP} / $${r.totalUSD}</span>
+  </div>
+
+  <div class="section-title">📋 Order Details</div>
   <div class="info-row">
     <span class="info-label">Order ID</span>
     <span class="info-value">${r.orderId}</span>
-  </div>
-  <div class="info-row">
-    <span class="info-label">Product</span>
-    <span class="info-value">${r.product}</span>
-  </div>
-  <div class="info-row">
-    <span class="info-label">Quantity</span>
-    <span class="info-value">${r.quantity}</span>
   </div>
   <div class="info-row">
     <span class="info-label">Roblox Username</span>
@@ -329,11 +391,6 @@ h1 {
   <div class="info-row" style="border-bottom: none;">
     <span class="info-label">Country</span>
     <span class="info-value">${r.country}</span>
-  </div>
-
-  <div class="price-row">
-    <span class="price-label">Total Paid</span>
-    <span class="price-value">£${r.totalGBP} / $${r.totalUSD}</span>
   </div>
 
   <div class="delivery">
