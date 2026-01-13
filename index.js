@@ -55,20 +55,6 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     const orderId = String(data.id);
 
-    // Extract Roblox username from ANY variant's additional_information
-    let roblox = "Not provided";
-    for (const variant of data.product_variants || []) {
-      if (variant.additional_information && Array.isArray(variant.additional_information)) {
-        const robloxField = variant.additional_information.find(f =>
-          f.label && f.label.toLowerCase().includes("roblox")
-        );
-        if (robloxField && robloxField.value) {
-          roblox = robloxField.value;
-          break;
-        }
-      }
-    }
-
     const email = data.customer_information?.email || "Hidden";
     const country = data.customer_information?.country || "Unknown";
 
@@ -92,24 +78,32 @@ app.post("/sellapp-webhook", async (req, res) => {
       const paymentDetails = variant.invoice_payment?.payment_details || {};
       currency = paymentDetails.currency || currency;
       
-      // Get price per unit
-      let unitPrice = paymentDetails.unit_price || 
-                      paymentDetails.total || 
-                      paymentDetails.gross_sale || 
-                      0;
-      
+      // Get price per unit (always use unit_price as it's most reliable)
+      let unitPrice = Number(paymentDetails.unit_price || 0);
       const quantity = variant.quantity || 1;
-      const productTotal = Number(unitPrice) * quantity;
+      const productTotal = unitPrice * quantity;
       totalCents += productTotal;
+
+      // Extract Roblox username for THIS specific product
+      let robloxUsername = "Not provided";
+      if (variant.additional_information && Array.isArray(variant.additional_information)) {
+        const robloxField = variant.additional_information.find(f =>
+          f.label && f.label.toLowerCase().includes("roblox")
+        );
+        if (robloxField && robloxField.value) {
+          robloxUsername = robloxField.value;
+        }
+      }
 
       products.push({
         name: variant.product_title || "Unknown Product",
         quantity: quantity,
         unitPrice: normalizeMoney(unitPrice),
-        total: normalizeMoney(productTotal)
+        total: normalizeMoney(productTotal),
+        robloxUsername: robloxUsername
       });
 
-      console.log(`Product: ${variant.product_title}, Qty: ${quantity}, Unit: ${unitPrice}, Total: ${productTotal}`);
+      console.log(`Product: ${variant.product_title}, Qty: ${quantity}, Unit: ${unitPrice}, Total: ${productTotal}, Roblox: ${robloxUsername}`);
     }
 
     // Convert total to decimal
@@ -139,7 +133,6 @@ app.post("/sellapp-webhook", async (req, res) => {
     orders.set(orderId, {
       orderId,
       products,
-      roblox,
       email,
       country,
       discordUser,
@@ -155,7 +148,6 @@ app.post("/sellapp-webhook", async (req, res) => {
     console.log("✅ Order processed:", {
       orderId,
       products,
-      roblox,
       discordUser,
       totalUSD,
       totalGBP,
@@ -164,7 +156,7 @@ app.post("/sellapp-webhook", async (req, res) => {
 
     // Build product list for Discord embed
     const productList = products.map(p => 
-      `${p.name} x${p.quantity} (£${p.unitPrice} each = £${p.total})`
+      `${p.name} x${p.quantity} - ${p.robloxUsername} (£${p.unitPrice} each = £${p.total})`
     ).join('\n');
 
     const embed = new EmbedBuilder()
@@ -175,7 +167,6 @@ app.post("/sellapp-webhook", async (req, res) => {
         { name: "💷 Total (GBP)", value: `£${totalGBP}`, inline: true },
         { name: "💵 Total (USD)", value: `$${totalUSD}`, inline: true },
         { name: "🏷 Coupon", value: coupon, inline: true },
-        { name: "🎮 Roblox Username", value: roblox, inline: true },
         { name: "🌍 Country", value: country, inline: true },
         { name: "💬 Discord", value: discordUser, inline: true },
         { name: "💳 Payment Status", value: status },
@@ -219,16 +210,34 @@ app.get("/receipt", (req, res) => {
     return res.status(403).send("Unauthorized");
   }
 
-  // Build product rows HTML
-  const productRows = r.products.map(p => `
-    <div class="product-item">
-      <div class="product-info">
-        <div class="product-name">${p.name}</div>
-        <div class="product-qty">Quantity: ${p.quantity}</div>
-      </div>
-      <div class="product-price">£${p.total}</div>
-    </div>
-  `).join('');
+  // Build product rows HTML - SAFE handling for all cases
+  let productRows = '';
+  try {
+    if (r.products && Array.isArray(r.products) && r.products.length > 0) {
+      productRows = r.products.map(p => {
+        const productName = String(p.name || "Unknown Product");
+        const quantity = String(p.quantity || 1);
+        const total = String(p.total || "0.00");
+        const roblox = String(p.robloxUsername || "Not provided");
+        
+        return `
+        <div class="product-item">
+          <div class="product-info">
+            <div class="product-name">${productName}</div>
+            <div class="product-detail">Quantity: ${quantity}</div>
+            <div class="product-detail">Roblox: ${roblox}</div>
+          </div>
+          <div class="product-price">£${total}</div>
+        </div>
+        `;
+      }).join('');
+    } else {
+      productRows = '<div class="product-item"><div class="product-info"><div class="product-name">No products found</div></div></div>';
+    }
+  } catch (err) {
+    console.error("Error building product rows:", err);
+    productRows = '<div class="product-item"><div class="product-info"><div class="product-name">Error loading products</div></div></div>';
+  }
 
   res.send(`
 <!DOCTYPE html>
@@ -294,16 +303,18 @@ h1 {
   font-weight: 600;
   color: #2d3748;
   font-size: 16px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
-.product-qty {
+.product-detail {
   color: #718096;
   font-size: 14px;
+  margin-top: 4px;
 }
 .product-price {
   font-weight: 700;
   color: #2d3748;
   font-size: 18px;
+  margin-left: 20px;
 }
 .info-row {
   display: flex;
@@ -368,21 +379,17 @@ h1 {
 
   <div class="total-row">
     <span class="total-label">Total Paid</span>
-    <span class="total-value">£${r.totalGBP} / $${r.totalUSD}</span>
+    <span class="total-value">£${r.totalGBP || '0.00'} / $${r.totalUSD || '0.00'}</span>
   </div>
 
   <div class="section-title">📋 Order Details</div>
   <div class="info-row">
     <span class="info-label">Order ID</span>
-    <span class="info-value">${r.orderId}</span>
-  </div>
-  <div class="info-row">
-    <span class="info-label">Roblox Username</span>
-    <span class="info-value">${r.roblox}</span>
+    <span class="info-value">${r.orderId || 'Unknown'}</span>
   </div>
   <div class="info-row">
     <span class="info-label">Discord</span>
-    <span class="info-value">${r.discordUser}</span>
+    <span class="info-value">${r.discordUser || 'Not provided'}</span>
   </div>
   <div class="info-row">
     <span class="info-label">Email</span>
@@ -390,13 +397,13 @@ h1 {
   </div>
   <div class="info-row" style="border-bottom: none;">
     <span class="info-label">Country</span>
-    <span class="info-value">${r.country}</span>
+    <span class="info-value">${r.country || 'Unknown'}</span>
   </div>
 
   <div class="delivery">
     <h3>🚚 Delivery Information</h3>
     <p>
-      Our staff will message you via Discord to deliver your product.
+      Our staff will message you via Discord to deliver your products.
       Please ensure your DMs are open and you have joined the RiveMart server.
     </p>
   </div>
