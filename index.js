@@ -63,18 +63,15 @@ app.post("/sellapp-webhook", async (req, res) => {
     const email = data.customer_information?.email || "Hidden";
     const country = data.customer_information?.country || "Unknown";
 
-    // Extract Discord username from discord_data.username
     let discordUser = "Not provided";
     if (data.customer_information?.discord_data?.username) {
       discordUser = data.customer_information.discord_data.username;
     }
 
-    // Get coupon code if used
     const coupon = data.coupon_id ? 
       data.product_variants?.[0]?.invoice_payment?.payment_details?.modifications?.find(m => m.type === "coupon")?.attributes?.code || "Used" 
       : "None";
 
-    // 🔧 CALCULATE TOTAL PRICE FROM ALL PRODUCTS
     let totalCents = 0;
     let currency = "GBP";
     const products = [];
@@ -83,13 +80,11 @@ app.post("/sellapp-webhook", async (req, res) => {
       const paymentDetails = variant.invoice_payment?.payment_details || {};
       currency = paymentDetails.currency || currency;
       
-      // Get price per unit (always use unit_price as it's most reliable)
       let unitPrice = Number(paymentDetails.unit_price || 0);
       const quantity = variant.quantity || 1;
       const productTotal = unitPrice * quantity;
       totalCents += productTotal;
 
-      // Extract Roblox username for THIS specific product
       let robloxUsername = "Not provided";
       if (variant.additional_information && Array.isArray(variant.additional_information)) {
         const robloxField = variant.additional_information.find(f =>
@@ -107,14 +102,10 @@ app.post("/sellapp-webhook", async (req, res) => {
         total: normalizeMoney(productTotal),
         robloxUsername: robloxUsername
       });
-
-      console.log(`Product: ${variant.product_title}, Qty: ${quantity}, Unit: ${unitPrice}, Total: ${productTotal}, Roblox: ${robloxUsername}`);
     }
 
-    // Convert total to decimal
     const totalPrice = normalizeMoney(totalCents);
     
-    // Format for GBP and USD
     let totalGBP = "0.00";
     let totalUSD = "0.00";
     
@@ -135,7 +126,6 @@ app.post("/sellapp-webhook", async (req, res) => {
     const createdAt = new Date(data.created_at).toUTCString();
     const token = generateToken(orderId);
 
-    // Store order data
     orders.set(orderId, {
       orderId,
       products,
@@ -148,20 +138,11 @@ app.post("/sellapp-webhook", async (req, res) => {
       currency,
       status,
       createdAt,
-      token,
-      rawWebhook: data // Store raw webhook for fallback
+      token
     });
 
-    console.log("✅ Order processed:", {
-      orderId,
-      products,
-      discordUser,
-      totalUSD,
-      totalGBP,
-      currency
-    });
+    console.log("✅ Order stored in memory:", orderId);
 
-    // Build product list for Discord embed
     const productList = products.map(p => 
       `${p.name} x${p.quantity} - ${p.robloxUsername} (£${p.unitPrice} each = £${p.total})`
     ).join('\n');
@@ -207,84 +188,87 @@ app.get("/success", (req, res) => {
   }
   
   const token = generateToken(order);
+  console.log(`📄 Redirecting to receipt for order ${order}`);
   res.redirect(`/receipt?order=${order}&token=${token}`);
 });
 
-/* ---------------- RECEIPT (FALLBACK MODE) ---------------- */
+/* ---------------- RECEIPT ---------------- */
 
 app.get("/receipt", (req, res) => {
   const { order, token } = req.query;
   
+  console.log(`📄 Receipt requested for order ${order}`);
+  
   if (!order || !token) {
+    console.error("❌ Missing order or token");
     return res.status(400).send("Missing order ID or token");
   }
 
-  // Verify token is valid
   if (!verifyToken(order, token)) {
+    console.error("❌ Invalid token");
     return res.status(403).send("Invalid token");
   }
 
-  // Try to get from memory first
-  let r = orders.get(order);
+  const r = orders.get(order);
   
-  // If not in memory, generate a basic receipt with just the order ID
   if (!r) {
-    console.log(`⚠️ Order ${order} not in memory, generating fallback receipt`);
-    r = {
-      orderId: order,
-      products: [],
-      email: "Hidden",
-      country: "Unknown",
-      discordUser: "Not provided",
-      coupon: "None",
-      totalUSD: "0.00",
-      totalGBP: "0.00",
-      currency: "GBP",
-      status: "✅ Paid",
-      createdAt: new Date().toUTCString(),
-      token: token
-    };
+    console.error(`❌ Order ${order} not found in memory`);
+    
+    // Generate fallback receipt
+    return res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+<title>RiveMart Receipt - Order #${order}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: white; font-family: 'Segoe UI', sans-serif; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
+.card { background: white; padding: 40px; max-width: 600px; width: 100%; border-radius: 12px; box-shadow: 0 2px 20px rgba(0,0,0,.1); border: 1px solid #e2e8f0; }
+h1 { color: #2d3748; margin-bottom: 10px; font-size: 28px; }
+.subtitle { color: #718096; margin-bottom: 30px; font-size: 14px; }
+.info { background: #f7fafc; padding: 20px; border-radius: 8px; margin: 20px 0; }
+.delivery { background: #f0fff4; border-left: 4px solid #48bb78; padding: 20px; border-radius: 8px; margin-top: 20px; }
+.delivery h3 { color: #2d3748; margin-bottom: 10px; font-size: 16px; font-weight: 600; }
+.delivery p { color: #4a5568; line-height: 1.6; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="card">
+<h1>✅ Purchase Confirmed</h1>
+<p class="subtitle">Thank you for your order!</p>
+<div class="info">
+<p><strong>Order ID:</strong> ${order}</p>
+<p style="margin-top: 10px;">Your order has been successfully processed and confirmed.</p>
+</div>
+<div class="delivery">
+<h3>🚚 Delivery Information</h3>
+<p>Our staff will message you via Discord to deliver your products. Please ensure your DMs are open and you have joined the RiveMart server.</p>
+<p style="margin-top: 10px; font-size: 13px; color: #718096;">If you have any questions, contact support with Order ID: <strong>${order}</strong></p>
+</div>
+</div>
+</body>
+</html>
+`);
   }
 
-  // Build product rows HTML - SAFE handling for all cases
+  console.log(`✅ Order ${order} found, generating receipt`);
+
   let productRows = '';
-  try {
-    if (r.products && Array.isArray(r.products) && r.products.length > 0) {
-      productRows = r.products.map(p => {
-        const productName = String(p.name || "Unknown Product");
-        const quantity = String(p.quantity || 1);
-        const total = String(p.total || "0.00");
-        const roblox = String(p.robloxUsername || "Not provided");
-        
-        return `
-        <div class="product-item">
-          <div class="product-info">
-            <div class="product-name">${productName}</div>
-            <div class="product-detail">Quantity: ${quantity}</div>
-            <div class="product-detail">Roblox: ${roblox}</div>
-          </div>
-          <div class="product-price">£${total}</div>
-        </div>
-        `;
-      }).join('');
-    } else {
-      productRows = `
-      <div class="product-item">
-        <div class="product-info">
-          <div class="product-name">Your order has been confirmed!</div>
-          <div class="product-detail">Order details will be delivered via Discord</div>
-        </div>
-      </div>`;
-    }
-  } catch (err) {
-    console.error("Error building product rows:", err);
-    productRows = `
+  
+  if (r.products && r.products.length > 0) {
+    productRows = r.products.map(p => `
     <div class="product-item">
       <div class="product-info">
-        <div class="product-name">Your order has been confirmed!</div>
-        <div class="product-detail">Order details will be delivered via Discord</div>
+        <div class="product-name">${p.name}</div>
+        <div class="product-detail">Quantity: ${p.quantity}</div>
+        <div class="product-detail">Roblox: ${p.robloxUsername}</div>
       </div>
-    </div>`;
+      <div class="product-price">£${p.total}</div>
+    </div>
+    `).join('');
+  } else {
+    productRows = '<div class="product-item"><div class="product-info"><div class="product-name">Your order has been confirmed!</div></div></div>';
   }
 
   res.send(`
@@ -294,176 +278,60 @@ app.get("/receipt", (req, res) => {
 <title>RiveMart Receipt - Order #${r.orderId}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-body {
-  background: white;
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  min-height: 100vh;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: 20px;
-}
-.card {
-  background: white;
-  padding: 40px;
-  max-width: 600px;
-  width: 100%;
-  border-radius: 12px;
-  box-shadow: 0 2px 20px rgba(0,0,0,.1);
-  border: 1px solid #e2e8f0;
-}
-h1 {
-  color: #2d3748;
-  margin-bottom: 10px;
-  font-size: 28px;
-}
-.subtitle {
-  color: #718096;
-  margin-bottom: 30px;
-  font-size: 14px;
-}
-.section-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #2d3748;
-  margin: 25px 0 15px 0;
-  padding-bottom: 10px;
-  border-bottom: 2px solid #e2e8f0;
-}
-.product-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 15px;
-  background: #f7fafc;
-  border-radius: 8px;
-  margin-bottom: 10px;
-}
-.product-info {
-  flex: 1;
-}
-.product-name {
-  font-weight: 600;
-  color: #2d3748;
-  font-size: 16px;
-  margin-bottom: 6px;
-}
-.product-detail {
-  color: #718096;
-  font-size: 14px;
-  margin-top: 4px;
-}
-.product-price {
-  font-weight: 700;
-  color: #2d3748;
-  font-size: 18px;
-  margin-left: 20px;
-}
-.info-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 12px 0;
-  border-bottom: 1px solid #e2e8f0;
-}
-.info-label {
-  font-weight: 600;
-  color: #4a5568;
-}
-.info-value {
-  color: #2d3748;
-  text-align: right;
-  font-weight: 500;
-}
-.total-row {
-  background: #2d3748;
-  color: white;
-  padding: 20px;
-  border-radius: 8px;
-  margin: 20px 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.total-label {
-  font-size: 18px;
-  font-weight: 600;
-}
-.total-value {
-  font-size: 24px;
-  font-weight: 700;
-}
-.delivery {
-  background: #f0fff4;
-  border-left: 4px solid #48bb78;
-  padding: 20px;
-  border-radius: 8px;
-  margin-top: 20px;
-}
-.delivery h3 {
-  color: #2d3748;
-  margin-bottom: 10px;
-  font-size: 16px;
-  font-weight: 600;
-}
-.delivery p {
-  color: #4a5568;
-  line-height: 1.6;
-  font-size: 14px;
-}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: white; font-family: 'Segoe UI', sans-serif; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
+.card { background: white; padding: 40px; max-width: 600px; width: 100%; border-radius: 12px; box-shadow: 0 2px 20px rgba(0,0,0,.1); border: 1px solid #e2e8f0; }
+h1 { color: #2d3748; margin-bottom: 10px; font-size: 28px; }
+.subtitle { color: #718096; margin-bottom: 30px; font-size: 14px; }
+.section-title { font-size: 18px; font-weight: 600; color: #2d3748; margin: 25px 0 15px 0; padding-bottom: 10px; border-bottom: 2px solid #e2e8f0; }
+.product-item { display: flex; justify-content: space-between; align-items: center; padding: 15px; background: #f7fafc; border-radius: 8px; margin-bottom: 10px; }
+.product-info { flex: 1; }
+.product-name { font-weight: 600; color: #2d3748; font-size: 16px; margin-bottom: 6px; }
+.product-detail { color: #718096; font-size: 14px; margin-top: 4px; }
+.product-price { font-weight: 700; color: #2d3748; font-size: 18px; margin-left: 20px; }
+.info-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }
+.info-label { font-weight: 600; color: #4a5568; }
+.info-value { color: #2d3748; text-align: right; font-weight: 500; }
+.total-row { background: #2d3748; color: white; padding: 20px; border-radius: 8px; margin: 20px 0; display: flex; justify-content: space-between; align-items: center; }
+.total-label { font-size: 18px; font-weight: 600; }
+.total-value { font-size: 24px; font-weight: 700; }
+.delivery { background: #f0fff4; border-left: 4px solid #48bb78; padding: 20px; border-radius: 8px; margin-top: 20px; }
+.delivery h3 { color: #2d3748; margin-bottom: 10px; font-size: 16px; font-weight: 600; }
+.delivery p { color: #4a5568; line-height: 1.6; font-size: 14px; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>✅ Purchase Confirmed</h1>
-  <p class="subtitle">Thank you for your order!</p>
-
-  <div class="section-title">📦 Products</div>
-  ${productRows}
-
-  ${(r.totalGBP !== "0.00" || r.totalUSD !== "0.00") ? `
-  <div class="total-row">
-    <span class="total-label">Total Paid</span>
-    <span class="total-value">£${r.totalGBP} / $${r.totalUSD}</span>
-  </div>
-  ` : ''}
-
-  <div class="section-title">📋 Order Details</div>
-  <div class="info-row">
-    <span class="info-label">Order ID</span>
-    <span class="info-value">${r.orderId}</span>
-  </div>
-  ${r.discordUser !== "Not provided" ? `
-  <div class="info-row">
-    <span class="info-label">Discord</span>
-    <span class="info-value">${r.discordUser}</span>
-  </div>
-  ` : ''}
-  ${r.email !== "Hidden" ? `
-  <div class="info-row">
-    <span class="info-label">Email</span>
-    <span class="info-value">${maskEmail(r.email)}</span>
-  </div>
-  ` : ''}
-  <div class="info-row" style="border-bottom: none;">
-    <span class="info-label">Status</span>
-    <span class="info-value">${r.status}</span>
-  </div>
-
-  <div class="delivery">
-    <h3>🚚 Delivery Information</h3>
-    <p>
-      Our staff will message you via Discord to deliver your products.
-      Please ensure your DMs are open and you have joined the RiveMart server.
-    </p>
-    <p style="margin-top: 10px; font-size: 13px; color: #718096;">
-      If you have any questions about your order, please contact support with Order ID: <strong>${r.orderId}</strong>
-    </p>
-  </div>
+<h1>✅ Purchase Confirmed</h1>
+<p class="subtitle">Thank you for your order!</p>
+<div class="section-title">📦 Products</div>
+${productRows}
+<div class="total-row">
+<span class="total-label">Total Paid</span>
+<span class="total-value">£${r.totalGBP} / $${r.totalUSD}</span>
+</div>
+<div class="section-title">📋 Order Details</div>
+<div class="info-row">
+<span class="info-label">Order ID</span>
+<span class="info-value">${r.orderId}</span>
+</div>
+<div class="info-row">
+<span class="info-label">Discord</span>
+<span class="info-value">${r.discordUser}</span>
+</div>
+<div class="info-row">
+<span class="info-label">Email</span>
+<span class="info-value">${maskEmail(r.email)}</span>
+</div>
+<div class="info-row" style="border-bottom: none;">
+<span class="info-label">Country</span>
+<span class="info-value">${r.country}</span>
+</div>
+<div class="delivery">
+<h3>🚚 Delivery Information</h3>
+<p>Our staff will message you via Discord to deliver your products. Please ensure your DMs are open and you have joined the RiveMart server.</p>
+<p style="margin-top: 10px; font-size: 13px; color: #718096;">If you have any questions, contact support with Order ID: <strong>${r.orderId}</strong></p>
+</div>
 </div>
 </body>
 </html>
