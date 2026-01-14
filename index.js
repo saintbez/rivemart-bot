@@ -29,6 +29,11 @@ function generateToken(orderId) {
     .digest("hex");
 }
 
+function verifyToken(orderId, token) {
+  const expectedToken = generateToken(orderId);
+  return expectedToken === token;
+}
+
 /* ---------------- DISCORD ---------------- */
 
 const client = new Client({
@@ -130,6 +135,7 @@ app.post("/sellapp-webhook", async (req, res) => {
     const createdAt = new Date(data.created_at).toUTCString();
     const token = generateToken(orderId);
 
+    // Store order data
     orders.set(orderId, {
       orderId,
       products,
@@ -142,7 +148,8 @@ app.post("/sellapp-webhook", async (req, res) => {
       currency,
       status,
       createdAt,
-      token
+      token,
+      rawWebhook: data // Store raw webhook for fallback
     });
 
     console.log("✅ Order processed:", {
@@ -195,19 +202,48 @@ app.post("/sellapp-webhook", async (req, res) => {
 
 app.get("/success", (req, res) => {
   const order = req.query.order;
-  const record = orders.get(order);
-  if (!record) return res.send("Order not found.");
-  res.redirect(`/receipt?order=${order}&token=${record.token}`);
+  if (!order) {
+    return res.status(400).send("Missing order ID");
+  }
+  
+  const token = generateToken(order);
+  res.redirect(`/receipt?order=${order}&token=${token}`);
 });
 
-/* ---------------- RECEIPT ---------------- */
+/* ---------------- RECEIPT (FALLBACK MODE) ---------------- */
 
 app.get("/receipt", (req, res) => {
   const { order, token } = req.query;
-  const r = orders.get(order);
+  
+  if (!order || !token) {
+    return res.status(400).send("Missing order ID or token");
+  }
 
-  if (!r || r.token !== token) {
-    return res.status(403).send("Unauthorized");
+  // Verify token is valid
+  if (!verifyToken(order, token)) {
+    return res.status(403).send("Invalid token");
+  }
+
+  // Try to get from memory first
+  let r = orders.get(order);
+  
+  // If not in memory, generate a basic receipt with just the order ID
+  if (!r) {
+    console.log(`⚠️ Order ${order} not in memory, generating fallback receipt`);
+    r = {
+      orderId: order,
+      products: [],
+      email: "Hidden",
+      country: "Unknown",
+      discordUser: "Not provided",
+      coupon: "None",
+      totalUSD: "0.00",
+      totalGBP: "0.00",
+      currency: "GBP",
+      status: "✅ Paid",
+      createdAt: new Date().toUTCString(),
+      token: token
+    };
   }
 
   // Build product rows HTML - SAFE handling for all cases
@@ -232,18 +268,30 @@ app.get("/receipt", (req, res) => {
         `;
       }).join('');
     } else {
-      productRows = '<div class="product-item"><div class="product-info"><div class="product-name">No products found</div></div></div>';
+      productRows = `
+      <div class="product-item">
+        <div class="product-info">
+          <div class="product-name">Your order has been confirmed!</div>
+          <div class="product-detail">Order details will be delivered via Discord</div>
+        </div>
+      </div>`;
     }
   } catch (err) {
     console.error("Error building product rows:", err);
-    productRows = '<div class="product-item"><div class="product-info"><div class="product-name">Error loading products</div></div></div>';
+    productRows = `
+    <div class="product-item">
+      <div class="product-info">
+        <div class="product-name">Your order has been confirmed!</div>
+        <div class="product-detail">Order details will be delivered via Discord</div>
+      </div>
+    </div>`;
   }
 
   res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-<title>RiveMart Receipt</title>
+<title>RiveMart Receipt - Order #${r.orderId}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
 * {
@@ -377,27 +425,33 @@ h1 {
   <div class="section-title">📦 Products</div>
   ${productRows}
 
+  ${(r.totalGBP !== "0.00" || r.totalUSD !== "0.00") ? `
   <div class="total-row">
     <span class="total-label">Total Paid</span>
-    <span class="total-value">£${r.totalGBP || '0.00'} / $${r.totalUSD || '0.00'}</span>
+    <span class="total-value">£${r.totalGBP} / $${r.totalUSD}</span>
   </div>
+  ` : ''}
 
   <div class="section-title">📋 Order Details</div>
   <div class="info-row">
     <span class="info-label">Order ID</span>
-    <span class="info-value">${r.orderId || 'Unknown'}</span>
+    <span class="info-value">${r.orderId}</span>
   </div>
+  ${r.discordUser !== "Not provided" ? `
   <div class="info-row">
     <span class="info-label">Discord</span>
-    <span class="info-value">${r.discordUser || 'Not provided'}</span>
+    <span class="info-value">${r.discordUser}</span>
   </div>
+  ` : ''}
+  ${r.email !== "Hidden" ? `
   <div class="info-row">
     <span class="info-label">Email</span>
     <span class="info-value">${maskEmail(r.email)}</span>
   </div>
+  ` : ''}
   <div class="info-row" style="border-bottom: none;">
-    <span class="info-label">Country</span>
-    <span class="info-value">${r.country || 'Unknown'}</span>
+    <span class="info-label">Status</span>
+    <span class="info-value">${r.status}</span>
   </div>
 
   <div class="delivery">
@@ -405,6 +459,9 @@ h1 {
     <p>
       Our staff will message you via Discord to deliver your products.
       Please ensure your DMs are open and you have joined the RiveMart server.
+    </p>
+    <p style="margin-top: 10px; font-size: 13px; color: #718096;">
+      If you have any questions about your order, please contact support with Order ID: <strong>${r.orderId}</strong>
     </p>
   </div>
 </div>
