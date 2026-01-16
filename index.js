@@ -418,7 +418,7 @@ ticketBtn.addEventListener('click', async () => {
     console.error('❌ Ticket creation failed:', err);
     ticketBtn.textContent = '❌ Failed - Try Discord';
     ticketBtn.className = 'btn btn-secondary';
-    alert('❌ Could not create ticket.\\n\\nError: ' + err.message + '\\n\\nPlease use Discord support instead or check your API key permissions.');
+    alert('❌ Could not create ticket.\\n\\nError: ' + err.message + '\\n\\nPlease use Discord Support instead or check your API key permissions.');
   }
   
   setTimeout(() => {
