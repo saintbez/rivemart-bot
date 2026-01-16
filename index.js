@@ -14,6 +14,42 @@ const maskEmail = (email) => email?.includes("@") ? `${email.slice(0, 3)}***@${e
 const generateToken = (id) => crypto.createHmac("sha256", process.env.RECEIPT_SECRET).update(id).digest("hex");
 const verifyToken = (id, token) => generateToken(id) === token;
 
+// Sell.app API helper
+async function createSupportTicket(orderId, email, products, discordUser) {
+  try {
+    const productList = products.map(p => 
+      `${p.name} x${p.quantity} - Roblox: ${p.robloxUsername}`
+    ).join('\n');
+
+    const response = await fetch("https://sell.app/api/v1/tickets", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.SELLAPP_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email: email,
+        subject: `Order Support - #${orderId}`,
+        message: `Hello! I just completed order #${orderId}.\n\nProducts:\n${productList}\n\nDiscord: ${discordUser}\n\nI have a question about my order.`,
+        priority: "medium"
+      })
+    });
+
+    const data = await response.json();
+    
+    if (response.ok) {
+      console.log(`✅ Ticket created for order ${orderId}:`, data);
+      return { success: true, ticketId: data.data?.id };
+    } else {
+      console.error(`❌ Failed to create ticket:`, data);
+      return { success: false, error: data };
+    }
+  } catch (err) {
+    console.error("❌ Ticket creation error:", err);
+    return { success: false, error: err.message };
+  }
+}
+
 // Discord
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.once("ready", () => console.log(`✅ ${client.user.tag}`));
@@ -147,6 +183,29 @@ app.post("/sellapp-webhook", async (req, res) => {
   }
 });
 
+// NEW: Endpoint to create ticket
+app.post("/create-ticket", async (req, res) => {
+  const { order, token } = req.body;
+  
+  if (!order || !token || !verifyToken(order, token)) {
+    return res.status(403).json({ error: "Invalid request" });
+  }
+
+  const orderData = orders.get(order);
+  if (!orderData) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  const result = await createSupportTicket(
+    orderData.orderId,
+    orderData.email,
+    orderData.products,
+    orderData.discordUser
+  );
+
+  res.json(result);
+});
+
 // Success redirect
 app.get("/success", (req, res) => {
   const order = req.query.order;
@@ -236,11 +295,14 @@ h1{color:#1a1a1a;margin-bottom:8px;font-size:26px}
 .delivery p{color:#4b5563;line-height:1.5;font-size:13px;margin-top:8px}
 .warning{background:#fef3c7;border-left:4px solid #f59e0b;padding:12px;border-radius:8px;margin:16px 0;font-size:13px;color:#92400e;font-weight:500}
 .buttons{display:flex;flex-direction:column;gap:10px;margin-top:20px}
-.btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:14px 20px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;transition:all .2s}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:14px 20px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;transition:all .2s;border:none;cursor:pointer;width:100%}
 .btn-primary{background:#1a1a1a;color:#fff}
 .btn-primary:hover{background:#333}
 .btn-secondary{background:#f8f9fa;color:#1a1a1a;border:2px solid #e5e7eb}
 .btn-secondary:hover{background:#e5e7eb}
+.btn-success{background:#10b981;color:#fff}
+.btn-success:hover{background:#059669}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
 @media(max-width:640px){.card{padding:24px}}
 </style>
 </head>
@@ -296,12 +358,54 @@ ${r.coupon !== "None" ? `<div class="info-row">
 </div>
 
 <div class="buttons">
+<button id="ticketBtn" class="btn btn-success">🎫 Open Support Ticket</button>
 <a href="https://discord.com/channels/1457151716238561321/1457151718528778423/1460352217717674105" class="btn btn-primary">💬 Contact Support</a>
 <a href="https://www.roblox.com/share?code=eee03c29a2e4ec4b9f124a4c17af35be&type=Server" class="btn btn-secondary">🔒 Join Private Server</a>
 <a href="https://rivemart.shop" class="btn btn-secondary">← Back to RiveMart.shop</a>
 </div>
 
 </div>
+
+<script>
+const ticketBtn = document.getElementById('ticketBtn');
+ticketBtn.addEventListener('click', async () => {
+  ticketBtn.disabled = true;
+  ticketBtn.textContent = '⏳ Creating ticket...';
+  
+  try {
+    const response = await fetch('/create-ticket', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        order: '${order}',
+        token: '${token}'
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (data.success) {
+      ticketBtn.textContent = '✅ Ticket Created!';
+      ticketBtn.className = 'btn btn-success';
+      alert('Support ticket created! Check your email for updates.');
+    } else {
+      throw new Error(data.error || 'Failed to create ticket');
+    }
+  } catch (err) {
+    ticketBtn.textContent = '❌ Failed - Try Discord';
+    ticketBtn.className = 'btn btn-secondary';
+    alert('Could not create ticket. Please use Discord support instead.');
+  }
+  
+  setTimeout(() => {
+    ticketBtn.disabled = false;
+    if (ticketBtn.textContent === '✅ Ticket Created!') {
+      ticketBtn.textContent = '🎫 Open Support Ticket';
+      ticketBtn.className = 'btn btn-success';
+    }
+  }, 3000);
+});
+</script>
 </body>
 </html>`);
 });
