@@ -21,6 +21,10 @@ async function createSupportTicket(orderId, email, products, discordUser) {
       `${p.name} x${p.quantity} - Roblox: ${p.robloxUsername}`
     ).join('\n');
 
+    console.log(`🎫 Attempting to create ticket for order ${orderId}...`);
+    console.log(`   Email: ${email}`);
+    console.log(`   API Key: ${process.env.SELLAPP_API_KEY ? 'SET' : 'MISSING'}`);
+
     const response = await fetch("https://sell.app/api/v1/tickets", {
       method: "POST",
       headers: {
@@ -35,17 +39,29 @@ async function createSupportTicket(orderId, email, products, discordUser) {
       })
     });
 
-    const data = await response.json();
+    console.log(`   Response status: ${response.status} ${response.statusText}`);
+    
+    const responseText = await response.text();
+    console.log(`   Response body: ${responseText}`);
+    
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (parseErr) {
+      console.error(`   Failed to parse response as JSON:`, parseErr);
+      return { success: false, error: `Invalid JSON response: ${responseText}` };
+    }
     
     if (response.ok) {
       console.log(`✅ Ticket created for order ${orderId}:`, data);
       return { success: true, ticketId: data.data?.id };
     } else {
       console.error(`❌ Failed to create ticket:`, data);
-      return { success: false, error: data };
+      return { success: false, error: data.message || JSON.stringify(data) };
     }
   } catch (err) {
     console.error("❌ Ticket creation error:", err);
+    console.error("   Error stack:", err.stack);
     return { success: false, error: err.message };
   }
 }
