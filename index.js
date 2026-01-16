@@ -388,10 +388,12 @@ ${r.coupon !== "None" ? `<div class="info-row">
 <script>
 const ticketBtn = document.getElementById('ticketBtn');
 ticketBtn.addEventListener('click', async () => {
+  console.log('🎫 Ticket button clicked');
   ticketBtn.disabled = true;
   ticketBtn.textContent = '⏳ Creating ticket...';
   
   try {
+    console.log('📤 Sending request to /create-ticket');
     const response = await fetch('/create-ticket', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -401,19 +403,22 @@ ticketBtn.addEventListener('click', async () => {
       })
     });
     
+    console.log('📥 Response status:', response.status);
     const data = await response.json();
+    console.log('📥 Response data:', data);
     
     if (data.success) {
       ticketBtn.textContent = '✅ Ticket Created!';
       ticketBtn.className = 'btn btn-success';
-      alert('Support ticket created! Check your email for updates.');
+      alert('✅ Support ticket created successfully!\\n\\nTicket ID: ' + (data.ticketId || 'Check your email') + '\\n\\nYou will receive email notifications when staff reply.');
     } else {
       throw new Error(data.error || 'Failed to create ticket');
     }
   } catch (err) {
+    console.error('❌ Ticket creation failed:', err);
     ticketBtn.textContent = '❌ Failed - Try Discord';
     ticketBtn.className = 'btn btn-secondary';
-    alert('Could not create ticket. Please use Discord support instead.');
+    alert('❌ Could not create ticket.\\n\\nError: ' + err.message + '\\n\\nPlease use Discord support instead or check your API key permissions.');
   }
   
   setTimeout(() => {
