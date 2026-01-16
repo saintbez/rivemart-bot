@@ -17,9 +17,9 @@ const verifyToken = (id, token) => generateToken(id) === token;
 // Sell.app API helper
 async function createSupportTicket(orderId, email, products, discordUser) {
   try {
-    const productList = products.map(p => 
-      `${p.name} x${p.quantity} - Roblox: ${p.robloxUsername}`
-    ).join('\n');
+    const productList = products && products.length > 0 
+      ? products.map(p => `${p.name} x${p.quantity} - Roblox: ${p.robloxUsername}`).join('\n')
+      : 'Order details processing...';
 
     console.log(`🎫 Attempting to create ticket for order ${orderId}...`);
     console.log(`   Email: ${email}`);
@@ -35,7 +35,8 @@ async function createSupportTicket(orderId, email, products, discordUser) {
         email: email,
         subject: `Order Support - #${orderId}`,
         message: `Hello! I just completed order #${orderId}.\n\nProducts:\n${productList}\n\nDiscord: ${discordUser}\n\nI have a question about my order.`,
-        priority: "medium"
+        priority: "medium",
+        invoice_id: parseInt(orderId) // Include the order ID as required by Sell.app
       })
     });
 
@@ -208,15 +209,17 @@ app.post("/create-ticket", async (req, res) => {
   }
 
   const orderData = orders.get(order);
-  if (!orderData) {
-    return res.status(404).json({ error: "Order not found" });
-  }
+  
+  // Even if order data isn't available yet, we can still create a ticket with the order ID
+  const email = orderData?.email || "support@rivemart.shop"; // Fallback email
+  const products = orderData?.products || [];
+  const discordUser = orderData?.discordUser || "Not available yet";
 
   const result = await createSupportTicket(
-    orderData.orderId,
-    orderData.email,
-    orderData.products,
-    orderData.discordUser
+    order, // The order ID
+    email,
+    products,
+    discordUser
   );
 
   res.json(result);
