@@ -62,9 +62,9 @@ app.post("/request-support", async (req, res) => {
     const row = new ActionRowBuilder()
       .addComponents(
         new ButtonBuilder()
-          .setLabel('Create Ticket in Sell.app')
+          .setLabel('View in Sell.app Dashboard')
           .setStyle(ButtonStyle.Link)
-          .setURL(`https://sell.app/dashboard/support/tickets/new?email=${encodeURIComponent(email)}&subject=Order%20${order}%20Support`)
+          .setURL(`https://sell.app/dashboard/support/tickets`)
       );
 
     const channel = await client.channels.fetch(process.env.SUPPORT_CHANNEL_ID || process.env.ORDER_CHANNEL_ID);
