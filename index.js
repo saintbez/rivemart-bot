@@ -1,12 +1,13 @@
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 
 const app = express();
 app.use(express.json());
 
 const orders = new Map();
+const supportRequests = new Set(); // Track who already requested support
 
 // Helpers
 const normalizeMoney = (cents) => (Number(cents || 0) / 100).toFixed(2);
@@ -14,63 +15,76 @@ const maskEmail = (email) => email?.includes("@") ? `${email.slice(0, 3)}***@${e
 const generateToken = (id) => crypto.createHmac("sha256", process.env.RECEIPT_SECRET).update(id).digest("hex");
 const verifyToken = (id, token) => generateToken(id) === token;
 
-// Sell.app API helper
-async function createSupportTicket(orderId, email, products, discordUser) {
-  try {
-    const productList = products && products.length > 0 
-      ? products.map(p => `${p.name} x${p.quantity} - Roblox: ${p.robloxUsername}`).join('\n')
-      : 'Order details processing...';
-
-    console.log(`🎫 Attempting to create ticket for order ${orderId}...`);
-    console.log(`   Email: ${email}`);
-    console.log(`   API Key: ${process.env.SELLAPP_API_KEY ? 'SET' : 'MISSING'}`);
-
-    const response = await fetch("https://sell.app/api/v1/tickets", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.SELLAPP_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        email: email,
-        subject: `Order Support - #${orderId}`,
-        message: `Hello! I just completed order #${orderId}.\n\nProducts:\n${productList}\n\nDiscord: ${discordUser}\n\nI have a question about my order.`,
-        priority: "medium",
-        invoice_id: parseInt(orderId) // Include the order ID as required by Sell.app
-      })
-    });
-
-    console.log(`   Response status: ${response.status} ${response.statusText}`);
-    
-    const responseText = await response.text();
-    console.log(`   Response body: ${responseText}`);
-    
-    let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch (parseErr) {
-      console.error(`   Failed to parse response as JSON:`, parseErr);
-      return { success: false, error: `Invalid JSON response: ${responseText}` };
-    }
-    
-    if (response.ok) {
-      console.log(`✅ Ticket created for order ${orderId}:`, data);
-      return { success: true, ticketId: data.data?.id };
-    } else {
-      console.error(`❌ Failed to create ticket:`, data);
-      return { success: false, error: data.message || JSON.stringify(data) };
-    }
-  } catch (err) {
-    console.error("❌ Ticket creation error:", err);
-    console.error("   Error stack:", err.stack);
-    return { success: false, error: err.message };
-  }
-}
-
 // Discord
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.once("ready", () => console.log(`✅ ${client.user.tag}`));
 client.login(process.env.DISCORD_TOKEN);
+
+// NEW: Support request endpoint
+app.post("/request-support", async (req, res) => {
+  const { order, token } = req.body;
+  
+  if (!order || !token || !verifyToken(order, token)) {
+    return res.status(403).json({ success: false, error: "Invalid request" });
+  }
+
+  // Prevent spam - only allow one support request per order
+  if (supportRequests.has(order)) {
+    return res.json({ success: true, message: "Support request already sent" });
+  }
+
+  const orderData = orders.get(order);
+  const email = orderData?.email || "Not available";
+  const products = orderData?.products || [];
+  const discordUser = orderData?.discordUser || "Not available";
+  const totalGBP = orderData?.totalGBP || "0.00";
+  const totalUSD = orderData?.totalUSD || "0.00";
+
+  try {
+    const productList = products.length > 0 
+      ? products.map(p => `${p.name} x${p.quantity} - Roblox: ${p.robloxUsername}`).join('\n')
+      : 'Order details processing...';
+
+    const embed = new EmbedBuilder()
+      .setColor(0xff6b35)
+      .setTitle("🆘 Support Request")
+      .setDescription(`Customer needs help with Order #${order}`)
+      .addFields(
+        { name: "📦 Products", value: productList.substring(0, 1024) || "Processing..." },
+        { name: "💷 Total", value: `£${totalGBP} / $${totalUSD}`, inline: true },
+        { name: "💬 Discord", value: discordUser, inline: true },
+        { name: "📧 Email", value: email, inline: true },
+        { name: "🆔 Order ID", value: order }
+      )
+      .setFooter({ text: "Click below to create a Sell.app ticket" })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setLabel('Create Ticket in Sell.app')
+          .setStyle(ButtonStyle.Link)
+          .setURL(`https://sell.app/dashboard/support/tickets/new?email=${encodeURIComponent(email)}&subject=Order%20${order}%20Support`)
+      );
+
+    const channel = await client.channels.fetch(process.env.SUPPORT_CHANNEL_ID || process.env.ORDER_CHANNEL_ID);
+    if (channel) {
+      await channel.send({ 
+        content: `@here Customer requesting support for Order #${order}`,
+        embeds: [embed],
+        components: [row]
+      });
+      supportRequests.add(order);
+      console.log(`✅ Support request sent to Discord for order ${order}`);
+      res.json({ success: true, message: "Support request sent" });
+    } else {
+      res.status(500).json({ success: false, error: "Support channel not configured" });
+    }
+  } catch (err) {
+    console.error("❌ Support request error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Webhook
 app.post("/sellapp-webhook", async (req, res) => {
@@ -86,30 +100,22 @@ app.post("/sellapp-webhook", async (req, res) => {
     const country = custInfo.country || "Unknown";
     const discordUser = custInfo.discord_data?.username || "Not provided";
     
-    // Get coupon info
     const couponMod = data.product_variants?.[0]?.invoice_payment?.payment_details?.modifications?.find(m => m.type === "coupon");
     const coupon = data.coupon_id ? (couponMod?.attributes?.code || "Used") : "None";
 
-    // Get currency from payment data
     const currency = data.payment?.full_price?.currency || data.payment?.total?.payment_details?.currency || "GBP";
     const exchangeRate = parseFloat(data.payment?.total?.exchange_rate || 1.35);
 
     const products = [];
     let totalCents = 0;
 
-    // Process each product variant
     for (const variant of data.product_variants || []) {
       const paymentDetails = variant.invoice_payment?.payment_details || {};
-      
-      // Get the actual unit price (before discounts)
       const unitPrice = Number(paymentDetails.unit_price || 0);
       const quantity = variant.quantity || 1;
-      
-      // Calculate product total from unit price
       const productTotal = unitPrice * quantity;
       totalCents += productTotal;
 
-      // Extract Roblox username from additional info
       const robloxField = variant.additional_information?.find(f => 
         f.label?.toLowerCase().includes("roblox")
       );
@@ -125,11 +131,8 @@ app.post("/sellapp-webhook", async (req, res) => {
       console.log(`✅ Product: ${variant.product_title}, Unit: ${unitPrice}, Qty: ${quantity}, Total: ${productTotal}`);
     }
 
-    // Calculate totals - use full_price as the actual price before any modifications
     const fullPriceCents = Number(data.payment?.full_price?.base || totalCents);
     const actualPaidCents = Number(data.payment?.total?.payment_details?.total || 0);
-    
-    // Use full price for display (what they would have paid without coupon)
     const displayPrice = normalizeMoney(fullPriceCents);
     
     let totalGBP = displayPrice;
@@ -162,7 +165,6 @@ app.post("/sellapp-webhook", async (req, res) => {
     orders.set(orderId, orderData);
     console.log(`✅ Order ${orderId} stored:`, JSON.stringify(orderData, null, 2));
 
-    // Discord embed
     const productList = products.map(p => 
       `${p.name} x${p.quantity} - ${p.robloxUsername} (£${p.unitPrice} ea = £${p.total})`
     ).join('\n');
@@ -200,31 +202,6 @@ app.post("/sellapp-webhook", async (req, res) => {
   }
 });
 
-// NEW: Endpoint to create ticket
-app.post("/create-ticket", async (req, res) => {
-  const { order, token } = req.body;
-  
-  if (!order || !token || !verifyToken(order, token)) {
-    return res.status(403).json({ error: "Invalid request" });
-  }
-
-  const orderData = orders.get(order);
-  
-  // Even if order data isn't available yet, we can still create a ticket with the order ID
-  const email = orderData?.email || "support@rivemart.shop"; // Fallback email
-  const products = orderData?.products || [];
-  const discordUser = orderData?.discordUser || "Not available yet";
-
-  const result = await createSupportTicket(
-    order, // The order ID
-    email,
-    products,
-    discordUser
-  );
-
-  res.json(result);
-});
-
 // Success redirect
 app.get("/success", (req, res) => {
   const order = req.query.order;
@@ -252,7 +229,6 @@ app.get("/receipt", (req, res) => {
     console.log(`   Products:`, JSON.stringify(r.products, null, 2));
   }
 
-  // Build product rows - ALWAYS show products if they exist
   let productRows = '';
   
   if (r?.products && Array.isArray(r.products) && r.products.length > 0) {
@@ -270,7 +246,6 @@ app.get("/receipt", (req, res) => {
     console.log(`⚠️ No products found, showing fallback`);
   }
 
-  // Show actual paid amount if different from total
   const totalDisplay = r && r.actualPaid !== r.totalGBP 
     ? `<div class="total">
        <div>
@@ -373,12 +348,12 @@ ${r.coupon !== "None" ? `<div class="info-row">
 <div class="delivery">
 <h3>🚚 Delivery Information</h3>
 <p>Our staff will message you via Discord to deliver your products. Please ensure your DMs are open and you've joined the RiveMart server.</p>
-<p style="margin-top:10px;font-size:12px;color:#6b7280">Questions? Contact support with Order ID: <strong>${r?.orderId || order}</strong></p>
+<p style="margin-top:10px;font-size:12px;color:#6b7280">Need help? Use the button below to alert our support team!</p>
 </div>
 
 <div class="buttons">
-<button id="ticketBtn" class="btn btn-success">🎫 Open Support Ticket</button>
-<a href="https://discord.com/channels/1457151716238561321/1457151718528778423/1460352217717674105" class="btn btn-primary">💬 Contact Support</a>
+<button id="supportBtn" class="btn btn-success">🆘 Request Support</button>
+<a href="https://discord.com/channels/1457151716238561321/1457151718528778423/1460352217717674105" class="btn btn-primary">💬 Discord Support</a>
 <a href="https://www.roblox.com/share?code=eee03c29a2e4ec4b9f124a4c17af35be&type=Server" class="btn btn-secondary">🔒 Join Private Server</a>
 <a href="https://rivemart.shop" class="btn btn-secondary">← Back to RiveMart.shop</a>
 </div>
@@ -386,15 +361,13 @@ ${r.coupon !== "None" ? `<div class="info-row">
 </div>
 
 <script>
-const ticketBtn = document.getElementById('ticketBtn');
-ticketBtn.addEventListener('click', async () => {
-  console.log('🎫 Ticket button clicked');
-  ticketBtn.disabled = true;
-  ticketBtn.textContent = '⏳ Creating ticket...';
+const supportBtn = document.getElementById('supportBtn');
+supportBtn.addEventListener('click', async () => {
+  supportBtn.disabled = true;
+  supportBtn.textContent = '⏳ Sending request...';
   
   try {
-    console.log('📤 Sending request to /create-ticket');
-    const response = await fetch('/create-ticket', {
+    const response = await fetch('/request-support', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -403,30 +376,23 @@ ticketBtn.addEventListener('click', async () => {
       })
     });
     
-    console.log('📥 Response status:', response.status);
     const data = await response.json();
-    console.log('📥 Response data:', data);
     
     if (data.success) {
-      ticketBtn.textContent = '✅ Ticket Created!';
-      ticketBtn.className = 'btn btn-success';
-      alert('✅ Support ticket created successfully!\\n\\nTicket ID: ' + (data.ticketId || 'Check your email') + '\\n\\nYou will receive email notifications when staff reply.');
+      supportBtn.textContent = '✅ Support Notified!';
+      supportBtn.className = 'btn btn-success';
+      alert('✅ Support team has been notified!\\n\\nOur staff will help you shortly via Discord or email.\\nOrder ID: ${order}');
     } else {
-      throw new Error(data.error || 'Failed to create ticket');
+      throw new Error(data.error || 'Failed to send request');
     }
   } catch (err) {
-    console.error('❌ Ticket creation failed:', err);
-    ticketBtn.textContent = '❌ Failed - Try Discord';
-    ticketBtn.className = 'btn btn-secondary';
-    alert('❌ Could not create ticket.\\n\\nError: ' + err.message + '\\n\\nPlease use Discord Support instead or check your API key permissions.');
+    supportBtn.textContent = '❌ Failed - Use Discord';
+    supportBtn.className = 'btn btn-secondary';
+    alert('Could not send support request. Please use Discord support instead.');
   }
   
   setTimeout(() => {
-    ticketBtn.disabled = false;
-    if (ticketBtn.textContent === '✅ Ticket Created!') {
-      ticketBtn.textContent = '🎫 Open Support Ticket';
-      ticketBtn.className = 'btn btn-success';
-    }
+    supportBtn.disabled = false;
   }, 3000);
 });
 </script>
