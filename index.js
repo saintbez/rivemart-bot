@@ -1,4 +1,12 @@
-require("dotenv").config();
+}
+</script>
+</body>
+</html>`);
+});
+
+// Server - IMPORTANT: Use httpServer instead of app!
+const PORT = process.env.PORT || 8080;
+httpServer.listen(PORT, () => console.log(`🌐 Port ${PORT}`));require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
 const { createServer } = require("http");
@@ -636,4 +644,65 @@ function sendMessage() {
     orderId,
     token,
     message,
-    sender: 'customer
+    sender: 'customer'
+  });
+  
+  messageInput.value = '';
+}
+
+messageInput.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') sendMessage();
+});
+
+function markComplete() {
+  socket.emit('mark-complete', { orderId, token });
+  document.getElementById('reviewSection').classList.add('show');
+  alert('✅ Order marked as complete! Please leave a review below.');
+}
+
+// Star rating
+document.querySelectorAll('.star').forEach(star => {
+  star.addEventListener('click', () => {
+    selectedRating = parseInt(star.dataset.rating);
+    document.querySelectorAll('.star').forEach((s, i) => {
+      if (i < selectedRating) {
+        s.classList.add('selected');
+      } else {
+        s.classList.remove('selected');
+      }
+    });
+  });
+});
+
+async function submitReview() {
+  if (selectedRating === 0) {
+    alert('Please select a star rating');
+    return;
+  }
+  
+  const review = document.getElementById('reviewText').value.trim();
+  
+  try {
+    const response = await fetch('/submit-review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        order: orderId,
+        token: token,
+        rating: selectedRating,
+        review: review
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (data.success) {
+      alert('✅ Thank you for your review!');
+      document.getElementById('reviewSection').innerHTML = '<p style="text-align:center;color:#10b981;font-weight:600;">Thank you for your review! ❤️</p>';
+    } else {
+      alert('Failed to submit review. Please try again.');
+    }
+  } catch (err) {
+    alert('Failed to submit review. Please try again.');
+  }
+}
